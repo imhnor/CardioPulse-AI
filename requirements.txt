@@ -1,0 +1,15 @@
+wfdb
+numpy
+pandas
+matplotlib
+scikit-learn
+scipy
+tqdm
+seaborn
+
+torch
+torchvision
+torchaudio
+
+neurokit2
+biosppy
