@@ -10,7 +10,7 @@ import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ── Raw dataset (PTB-XL) ──────────────────────────────────────────────────────
-DATASET_DIR   = os.path.join(BASE_DIR, "C:\Users\letsl\Documents\GitHub\ptb-xl-a-large-publicly-available-electrocardiography-dataset-1.0.3")
+DATASET_DIR   = os.path.join(BASE_DIR, r"C:\Users\letsl\Documents\GitHub\ptb-xl-a-large-publicly-available-electrocardiography-dataset-1.0.3")
 RAW_CSV       = os.path.join(DATASET_DIR, "ptbxl_database.csv")
 SCP_CSV       = os.path.join(DATASET_DIR, "scp_statements.csv")
 

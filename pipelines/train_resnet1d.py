@@ -68,9 +68,10 @@ class ResBlock1D(nn.Module):
     """
     Standard 1-D Residual Block.
     If stride > 1 or channels differ, uses a 1x1 conv shortcut.
+    Default kernel size is set to 3 to prevent parameter bloat.
     """
     def __init__(self, in_ch: int, out_ch: int, stride: int = 1,
-                 kernel: int = 5):
+                 kernel: int = 3):
         super().__init__()
         pad = kernel // 2
         self.conv1  = nn.Conv1d(in_ch, out_ch, kernel, stride=stride,
@@ -97,8 +98,11 @@ class ResBlock1D(nn.Module):
 
 class ResNet1D(nn.Module):
     """
-    4-stage 1-D ResNet for 12-lead ECG multi-label classification.
-    ~1.8M parameters.
+    Optimized 4-stage 1-D ResNet for 12-lead ECG multi-label classification.
+    Refactored to enforce Option A (64 -> 128 -> 256 -> 256 channels) with
+    a progressive kernel size bottleneck strategy [7, 5, 3, 3] to align receptive
+    fields for cardiac signals.
+    Total Params: ~2.0 Million (GPU tensor core friendly).
     """
     def __init__(self, in_channels: int = 12, num_classes: int = 5):
         super().__init__()
@@ -108,31 +112,35 @@ class ResNet1D(nn.Module):
             nn.BatchNorm1d(64), nn.ReLU(inplace=True),
         )                                                 # -> (64, 500)
 
+        # Stage 1: Capture local wave morphologies (e.g., QRS details)
         self.layer1 = nn.Sequential(
-            ResBlock1D(64, 64),
-            ResBlock1D(64, 64),
+            ResBlock1D(64, 64, kernel=7),
+            ResBlock1D(64, 64, kernel=7),
         )                                                 # -> (64, 500)
 
+        # Stage 2: Capture intermediate morphological patterns
         self.layer2 = nn.Sequential(
-            ResBlock1D(64,  128, stride=2),
-            ResBlock1D(128, 128),
+            ResBlock1D(64,  128, stride=2, kernel=5),
+            ResBlock1D(128, 128, kernel=5),
         )                                                 # -> (128, 250)
 
+        # Stage 3: Transition to temporal/rhythmic combinations
         self.layer3 = nn.Sequential(
-            ResBlock1D(128, 256, stride=2),
-            ResBlock1D(256, 256),
+            ResBlock1D(128, 256, stride=2, kernel=3),
+            ResBlock1D(256, 256, kernel=3),
         )                                                 # -> (256, 125)
 
+        # Stage 4: Learn deep global representations without parameter explosion
         self.layer4 = nn.Sequential(
-            ResBlock1D(256, 512, stride=2),
-            ResBlock1D(512, 512),
-        )                                                 # -> (512, ~63)
+            ResBlock1D(256, 256, stride=2, kernel=3),
+            ResBlock1D(256, 256, kernel=3),
+        )                                                 # -> (256, ~63)
 
         self.pool       = nn.AdaptiveAvgPool1d(1)
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Dropout(0.4),
-            nn.Linear(512, num_classes),
+            nn.Dropout(0.5),                              # Increased to 0.5 to mitigate val loss divergence
+            nn.Linear(256, num_classes),
         )
 
     def forward(self, x):                                 # (B, 12, 1000)
@@ -188,6 +196,7 @@ def main():
         model, train_dl, val_dl, MODEL_PATH,
         epochs=EPOCHS, lr=LR, patience=PATIENCE,
         pos_weight_vec=pos_weight, device=device,
+        weight_decay=1e-3,  # Set stronger regularization to mitigate overfitting/validation divergence
     )
 
     # --- Test ---

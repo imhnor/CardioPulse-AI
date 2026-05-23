@@ -77,6 +77,7 @@ def train_model(
     patience       : int   = 10,
     pos_weight_vec : torch.Tensor = None,
     device         : torch.device = None,
+    weight_decay   : float = 1e-4,
 ) -> dict:
     """
     Train a PyTorch model and save the best checkpoint.
@@ -91,7 +92,7 @@ def train_model(
     criterion = nn.BCEWithLogitsLoss(
         pos_weight=pos_weight_vec.to(device) if pos_weight_vec is not None else None
     )
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
     best_val_loss  = float("inf")
