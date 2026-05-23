@@ -86,6 +86,3 @@ We provide comprehensive tools to generate:
    ```bash
    python evaluate_all.py
    ```
-
-## 🤝 Contribution & Standards
-This project follows strict Data Science best practices. All models must be evaluated against the hold-out test set only once per architecture. If you're contributing, ensure that random seeds are fixed and data splits are respected.
