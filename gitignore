@@ -1,0 +1,6 @@
+env/
+ecg_env/
+venv/
+*.xlsx
+data/processed/
+*.csv
