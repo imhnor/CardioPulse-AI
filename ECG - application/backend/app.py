@@ -147,11 +147,20 @@ async def upload_ecg(files: list[UploadFile] = File(...)):
                 raise HTTPException(status_code=400, detail=f"File '{uf.filename}' is empty.")
             session.add_file(uf.filename, content)
 
-        # Identify primary file
+        # Identify WFDB pairing requirement
+        names = [f.filename.lower() for f in files]
+
+        if any(n.endswith(".hea") for n in names):
+            if not any(n.endswith(".dat") for n in names):
+                cleanup_session(session.session_id)
+                raise HTTPException(
+                    status_code=400,
+                    detail="WFDB requires both .hea and .dat files"
+                )
+
         primary_path = session.get_primary_file()
         if not primary_path:
             raise HTTPException(status_code=400, detail="Could not determine primary ECG file.")
-
         # Detect format
         fmt = detect_format(primary_path)
         if fmt == ECGFormat.UNKNOWN:

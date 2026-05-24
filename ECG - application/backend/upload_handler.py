@@ -45,21 +45,14 @@ class UploadSession:
         return dest_path
 
     def get_primary_file(self) -> Optional[str]:
-        """
-        Returns the path to the primary ECG file:
-          - For WFDB: the .hea file
-          - For others: the only file
-        """
         if not self.files:
             return None
 
-        # Prefer .hea for WFDB sessions
         for name, path in self.files:
             if name.lower().endswith(".hea"):
-                return path
+                return os.path.splitext(path)[0]  # return base record path
 
-        # Otherwise first file
-        return self.files[0][1]
+        return None
 
     def cleanup(self):
         """Delete all session files and directory."""
