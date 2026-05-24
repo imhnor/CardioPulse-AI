@@ -1,0 +1,1358 @@
+"""
+app.py
+------
+FastAPI server for the ECG Prediction Web Application.
+
+Endpoints:
+  POST /api/upload   — Upload ECG file(s), returns format detection + signal info
+  POST /api/predict  — Run model inference on uploaded session
+  GET  /api/health   — Server health check
+  GET  /api/model-info — Model metadata
+
+Run with:
+  uvicorn app:app --reload --port 8000
+"""
+
+import os
+import sys
+import time
+import traceback
+from contextlib import asynccontextmanager
+from typing import Optional
+
+import numpy as np
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+# ── Ensure backend directory is on path ───────────────────────────────────────
+sys.path.insert(0, os.path.dirname(__file__))
+
+from upload_handler   import create_session, get_session, cleanup_session
+from format_detector  import detect_format, get_format_display_name, ECGFormat
+from ecg_extractor    import extract_ecg, CANONICAL_LEADS
+from preprocessing    import preprocess, ECGValidationError
+from inference        import load_model, predict, TARGET_LABELS, LABEL_INFO
+
+
+# ── Lifespan: pre-load model on startup ──────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Pre-load the model once at startup to avoid cold-start delay."""
+    print("[startup] Loading ResNet1D model ...")
+    try:
+        load_model()
+        print("[startup] Model loaded successfully.")
+    except FileNotFoundError as e:
+        print(f"[startup] WARNING: {e}")
+        print("[startup] Server will start but /predict will fail until model is placed at models/resnet1d.pth")
+    yield
+    print("[shutdown] Cleaning up ...")
+
+
+# ── App init ──────────────────────────────────────────────────────────────────
+
+app = FastAPI(
+    title       = "ECG Prediction API",
+    description = "12-lead ECG multi-label classification using ResNet1D on PTB-XL",
+    version     = "1.0.0",
+    lifespan    = lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins     = ["*"],
+    allow_credentials = True,
+    allow_methods     = ["*"],
+    allow_headers     = ["*"],
+)
+
+# Serve static frontend files
+_frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend")
+if os.path.isdir(_frontend_dir):
+    app.mount("/app", StaticFiles(directory=_frontend_dir, html=True), name="frontend")
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _error(code: int, detail: str) -> JSONResponse:
+    return JSONResponse(status_code=code, content={"success": False, "error": detail})
+
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/health")
+async def health():
+    """Health check endpoint."""
+    model_ok = True
+    try:
+        load_model()
+    except Exception:
+        model_ok = False
+
+    return {
+        "status":    "ok",
+        "model_loaded": model_ok,
+        "labels":    TARGET_LABELS,
+        "timestamp": time.time(),
+    }
+
+
+@app.get("/api/model-info")
+async def model_info():
+    """Return static model metadata."""
+    return {
+        "model":       "ResNet1D",
+        "dataset":     "PTB-XL",
+        "input_shape": [1, 12, 1000],
+        "fs":          100,
+        "leads":       CANONICAL_LEADS,
+        "classes":     [
+            {"code": k, "name": v["name"]} for k, v in LABEL_INFO.items()
+        ],
+        "expected_auroc": "0.90–0.93",
+    }
+
+
+@app.post("/api/upload")
+async def upload_ecg(files: list[UploadFile] = File(...)):
+    """
+    Upload one or more ECG files.
+    WFDB requires both .hea and .dat files.
+
+    Returns:
+      session_id      — use this in /api/predict
+      format          — detected format string
+      format_display  — human-readable format name
+      lead_names      — leads found in file
+      n_leads         — number of leads
+      fs              — sampling frequency
+      n_samples       — signal length
+      duration_s      — recording duration in seconds
+      patient_info    — demographics if available
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="No files uploaded.")
+
+    # Create session
+    session = create_session()
+
+    try:
+        # Save all uploaded files to session directory
+        for uf in files:
+            content = await uf.read()
+            if not content:
+                raise HTTPException(status_code=400, detail=f"File '{uf.filename}' is empty.")
+            session.add_file(uf.filename, content)
+
+        # Identify primary file
+        primary_path = session.get_primary_file()
+        if not primary_path:
+            raise HTTPException(status_code=400, detail="Could not determine primary ECG file.")
+
+        # Detect format
+        fmt = detect_format(primary_path)
+        if fmt == ECGFormat.UNKNOWN:
+            cleanup_session(session.session_id)
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Unsupported file format. Accepted: WFDB (.hea+.dat), "
+                    "DICOM (.dcm), XML (.xml), SCP-ECG (.scp)"
+                )
+            )
+
+        # Extract signal
+        try:
+            result = extract_ecg(primary_path, fmt)
+        except ImportError as e:
+            cleanup_session(session.session_id)
+            raise HTTPException(status_code=500, detail=f"Missing dependency: {e}")
+        except ValueError as e:
+            cleanup_session(session.session_id)
+            raise HTTPException(status_code=422, detail=f"ECG extraction failed: {e}")
+        except Exception as e:
+            cleanup_session(session.session_id)
+            raise HTTPException(status_code=422, detail=f"Could not read ECG file: {e}")
+
+        return {
+            "success":        True,
+            "session_id":     session.session_id,
+            "format":         fmt.value,
+            "format_display": get_format_display_name(fmt),
+            "lead_names":     result.lead_names,
+            "n_leads":        len(result.lead_names),
+            "fs":             result.fs,
+            "n_samples":      result.n_samples,
+            "duration_s":     round(result.duration_s, 2),
+            "patient_info":   result.patient_info,
+            "files_received": [f.filename for f in files],
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        cleanup_session(session.session_id)
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {traceback.format_exc()}")
+
+
+@app.post("/api/predict")
+async def predict_ecg(session_id: str = Form(...)):
+    """
+    Run model inference on a previously uploaded ECG session.
+
+    Returns:
+      probabilities   — {label: float} sigmoid scores
+      predictions     — {label: bool}  threshold 0.5
+      top_diagnosis   — highest-probability label name
+      is_normal       — bool
+      labels_info     — list sorted by probability for UI rendering
+    """
+    session = get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found. Please upload the ECG file again.")
+
+    primary_path = session.get_primary_file()
+    if not primary_path:
+        raise HTTPException(status_code=400, detail="No files in session.")
+
+    try:
+        # Re-detect format and extract signal
+        fmt    = detect_format(primary_path)
+        result = extract_ecg(primary_path, fmt)
+
+        # Preprocess
+        try:
+            prep = preprocess(result)
+        except ECGValidationError as e:
+            raise HTTPException(status_code=422, detail=f"ECG validation failed: {e}")
+
+        # Inference
+        try:
+            prediction = predict(prep.tensor)
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=500, detail=f"Model file not found: {e}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Model inference failed: {e}")
+
+        # Build response
+        response = {
+            "success":        True,
+            "session_id":     session_id,
+            **prediction,
+            "preprocessing": {
+                "original_fs":  prep.original_fs,
+                "target_fs":    100,
+                "resampled":    prep.resampled,
+                "padded":       prep.padded,
+                "trimmed":      prep.trimmed,
+                "lead_order":   prep.lead_order,
+            },
+        }
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Prediction error: {traceback.format_exc()}")
+    finally:
+        # Clean up temp files after prediction
+        cleanup_session(session_id)
+
+
+@app.post("/api/upload-and-predict")
+async def upload_and_predict(files: list[UploadFile] = File(...)):
+    """
+    Combined single-step endpoint: upload + detect + extract + predict in one call.
+    Useful for simple integrations that don't need the two-step flow.
+    """
+    # Step 1: Upload
+    upload_resp = await upload_ecg(files)
+    session_id  = upload_resp["session_id"]
+
+    # Step 2: Predict
+    from fastapi import Request
+    from starlette.datastructures import FormData
+
+    # Re-use predict endpoint logic directly
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=500, detail="Session lost between upload and predict.")
+
+    primary_path = session.get_primary_file()
+    fmt          = detect_format(primary_path)
+    extraction   = extract_ecg(primary_path, fmt)
+
+    try:
+        prep = preprocess(extraction)
+    except ECGValidationError as e:
+        cleanup_session(session_id)
+        raise HTTPException(status_code=422, detail=f"ECG validation failed: {e}")
+
+    try:
+        prediction = predict(prep.tensor)
+    except Exception as e:
+        cleanup_session(session_id)
+        raise HTTPException(status_code=500, detail=f"Inference failed: {e}")
+
+    cleanup_session(session_id)
+
+    return {
+        "success":       True,
+        "upload":        upload_resp,
+        "preprocessing": {
+            "original_fs": prep.original_fs,
+            "resampled":   prep.resampled,
+            "padded":      prep.padded,
+            "trimmed":     prep.trimmed,
+        },
+        **prediction,
+    }
+"""
+ecg_extractor.py
+----------------
+Extracts 12-lead ECG signals from supported file formats.
+
+Returns a unified ExtractionResult containing:
+  signal      : np.ndarray (N, 12) — raw ADC values in mV
+  fs          : float              — sampling frequency in Hz
+  lead_names  : list[str]          — lead names as found in file
+  n_samples   : int                — number of time samples
+  duration_s  : float              — recording duration in seconds
+  patient_info: dict               — optional demographics if available
+"""
+
+import os
+import io
+import struct
+import numpy as np
+from dataclasses import dataclass, field
+from typing import Optional
+import xml.etree.ElementTree as ET
+
+from format_detector import ECGFormat
+
+
+# ── Result dataclass ──────────────────────────────────────────────────────────
+
+@dataclass
+class ExtractionResult:
+    signal:       np.ndarray            # (N, 12) float32 in mV
+    fs:           float                 # sampling frequency Hz
+    lead_names:   list                  # list of 12 lead name strings
+    n_samples:    int                   # time dimension
+    duration_s:   float                 # recording length seconds
+    patient_info: dict = field(default_factory=dict)  # optional demographics
+    source_format: str = ""
+
+
+# ── Lead name normalisation map ───────────────────────────────────────────────
+# Maps variant spellings → canonical PTB-XL names
+_LEAD_ALIASES = {
+    # Standard leads
+    "lead i":  "I",  "i":  "I",  "leadi":  "I",
+    "lead ii": "II", "ii": "II", "leadii": "II",
+    "lead iii":"III","iii":"III","leadiii":"III",
+    # Augmented
+    "avr": "aVR", "avl": "aVL", "avf": "aVF",
+    "-avr":"aVR",
+    "augmented vector right":  "aVR",
+    "augmented vector left":   "aVL",
+    "augmented vector foot":   "aVF",
+    # Precordial
+    "v1":"V1","v2":"V2","v3":"V3","v4":"V4","v5":"V5","v6":"V6",
+    "chest1":"V1","chest2":"V2","chest3":"V3",
+    "chest4":"V4","chest5":"V5","chest6":"V6",
+}
+
+# Canonical lead order for PTB-XL model
+CANONICAL_LEADS = ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"]
+
+
+def _normalise_lead_name(raw: str) -> str:
+    key = raw.strip().lower().replace(" ", "").replace("-", "")
+    return _LEAD_ALIASES.get(key, raw.strip())
+
+
+# ── WFDB extractor ────────────────────────────────────────────────────────────
+
+def _extract_wfdb(hea_path: str) -> ExtractionResult:
+    try:
+        import wfdb
+    except ImportError:
+        raise ImportError("wfdb package required: pip install wfdb")
+
+    # Strip extension — wfdb.rdsamp needs the base record name
+    base = os.path.splitext(hea_path)[0]
+    signal, meta = wfdb.rdsamp(base)
+    # signal: (N, n_leads) in physical units (mV usually)
+    lead_names = [_normalise_lead_name(n) for n in meta.sig_name]
+    fs = float(meta.fs)
+    n  = signal.shape[0]
+
+    return ExtractionResult(
+        signal=signal.astype(np.float32),
+        fs=fs,
+        lead_names=lead_names,
+        n_samples=n,
+        duration_s=n / fs,
+        source_format="WFDB",
+    )
+
+
+# ── DICOM extractor ───────────────────────────────────────────────────────────
+
+def _extract_dicom(dcm_path: str) -> ExtractionResult:
+    try:
+        import pydicom
+    except ImportError:
+        raise ImportError("pydicom package required: pip install pydicom")
+
+    ds = pydicom.dcmread(dcm_path)
+
+    # Patient info
+    patient_info = {}
+    for tag_name, attr in [("PatientName","PatientName"),("PatientAge","PatientAge"),("PatientSex","PatientSex")]:
+        try:
+            patient_info[tag_name] = str(getattr(ds, attr))
+        except AttributeError:
+            pass
+
+    # Sampling frequency
+    try:
+        fs = float(ds.WaveformSequence[0].SamplingFrequency)
+    except (AttributeError, IndexError, TypeError):
+        fs = 500.0  # DICOM default
+
+    # Extract waveform channels
+    waveform_seq = ds.WaveformSequence[0]
+    n_channels   = int(waveform_seq.NumberOfWaveformChannels)
+    n_samples    = int(waveform_seq.NumberOfWaveformSamples)
+
+    # Channel definitions → lead names
+    lead_names = []
+    channel_sens = []
+    channel_base = []
+    for ch_def in waveform_seq.ChannelDefinitionSequence:
+        try:
+            lead_names.append(_normalise_lead_name(str(ch_def.ChannelSourceSequence[0].CodeMeaning)))
+        except Exception:
+            lead_names.append(f"Lead{len(lead_names)+1}")
+        # Sensitivity: convert from raw integer → mV
+        try:
+            sens = float(ch_def.ChannelSensitivity)
+        except Exception:
+            sens = 1.0
+        try:
+            baseline = float(ch_def.ChannelBaseline)
+        except Exception:
+            baseline = 0.0
+        channel_sens.append(sens)
+        channel_base.append(baseline)
+
+    # Raw multiplex waveform data (interleaved channels)
+    raw_data = waveform_seq.WaveformData
+    dtype_map = {8: np.int8, 16: np.int16, 32: np.int32}
+    bits = int(getattr(waveform_seq, "WaveformBitsAllocated", 16))
+    dtype = dtype_map.get(bits, np.int16)
+
+    raw = np.frombuffer(raw_data, dtype=dtype)
+    raw = raw.reshape(n_samples, n_channels).astype(np.float32)
+
+    # Apply sensitivity (raw → mV)
+    for i in range(n_channels):
+        raw[:, i] = (raw[:, i] - channel_base[i]) * channel_sens[i] * 1e-3  # μV → mV
+
+    return ExtractionResult(
+        signal=raw,
+        fs=fs,
+        lead_names=lead_names,
+        n_samples=n_samples,
+        duration_s=n_samples / fs,
+        patient_info=patient_info,
+        source_format="DICOM",
+    )
+
+
+# ── XML extractor ─────────────────────────────────────────────────────────────
+
+def _extract_xml(xml_path: str) -> ExtractionResult:
+    """
+    Handles multiple XML ECG dialects:
+      - HL7 aECG (annotated ECG)
+      - Philips/GE proprietary XML
+      - Generic ECG XML with <LeadData> or <waveform> tags
+    """
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+
+    # Strip namespace from all tags for universal matching
+    def strip_ns(tag):
+        return tag.split("}")[-1] if "}" in tag else tag
+
+    def find_all_stripped(element, tag):
+        return [el for el in element.iter() if strip_ns(el.tag) == tag]
+
+    # Try to find sampling frequency
+    fs = 500.0
+    for tag in ["SampleRate", "sampleRate", "samplingFrequency", "SamplingFrequency", "ChannelSampleCountTotal"]:
+        els = find_all_stripped(root, tag)
+        if els and els[0].text:
+            try:
+                fs = float(els[0].text)
+                break
+            except ValueError:
+                pass
+
+    # Find lead data blocks — try multiple schemas
+    leads_data = {}
+
+    # Schema 1: <LeadData><LeadID>I</LeadID><WaveFormData>...</WaveFormData>
+    lead_data_els = find_all_stripped(root, "LeadData")
+    for ld in lead_data_els:
+        id_el   = next((el for el in ld.iter() if strip_ns(el.tag) in ("LeadID","leadId","ChannelLabel")), None)
+        wave_el = next((el for el in ld.iter() if strip_ns(el.tag) in ("WaveFormData","waveFormData","WaveformData","samples","data")), None)
+        if id_el is not None and wave_el is not None and wave_el.text:
+            lead_name = _normalise_lead_name(id_el.text or "")
+            try:
+                samples = np.array([float(v) for v in wave_el.text.split()], dtype=np.float32)
+                leads_data[lead_name] = samples
+            except ValueError:
+                pass
+
+    # Schema 2: <waveform><lead id="I">...</lead>
+    if not leads_data:
+        lead_els = find_all_stripped(root, "lead")
+        for le in lead_els:
+            lead_id = le.attrib.get("id") or le.attrib.get("name") or ""
+            text    = le.text or ""
+            if lead_id and text.strip():
+                lead_name = _normalise_lead_name(lead_id)
+                try:
+                    leads_data[lead_name] = np.array([float(v) for v in text.split()], dtype=np.float32)
+                except ValueError:
+                    pass
+
+    # Schema 3: Philips — <sequence><value>...</value> with channel mapping
+    if not leads_data:
+        seqs = find_all_stripped(root, "sequence")
+        for i, seq in enumerate(seqs[:12]):
+            val_el = next((el for el in seq.iter() if strip_ns(el.tag) == "value"), None)
+            if val_el is not None and val_el.text:
+                lead_name = CANONICAL_LEADS[i] if i < 12 else f"Lead{i+1}"
+                try:
+                    leads_data[lead_name] = np.array([float(v) for v in val_el.text.split()], dtype=np.float32)
+                except ValueError:
+                    pass
+
+    if not leads_data:
+        raise ValueError("Could not extract any lead data from XML file. Schema not recognised.")
+
+    # Build (N, 12) matrix — use intersection with canonical leads
+    min_len  = min(len(v) for v in leads_data.values())
+    signal   = np.zeros((min_len, 12), dtype=np.float32)
+    found    = []
+    for i, lead in enumerate(CANONICAL_LEADS):
+        if lead in leads_data:
+            arr = leads_data[lead][:min_len]
+            signal[:, i] = arr
+            found.append(lead)
+
+    return ExtractionResult(
+        signal=signal,
+        fs=fs,
+        lead_names=list(leads_data.keys()),
+        n_samples=min_len,
+        duration_s=min_len / fs,
+        source_format="XML",
+    )
+
+
+# ── SCP-ECG extractor ─────────────────────────────────────────────────────────
+
+def _extract_scp(scp_path: str) -> ExtractionResult:
+    """
+    Minimal SCP-ECG (EN1064) binary decoder.
+    Decodes Section 6 (rhythm data) to extract lead samples.
+    """
+    with open(scp_path, "rb") as f:
+        data = f.read()
+
+    # SCP-ECG structure:
+    # Bytes 0-3 : file CRC (uint16) + file length (uint32) — actually first 6 bytes are section 0 header
+    # Then sections: each section starts with [section_id: uint16] [section_crc: uint16] [section_length: uint32]
+
+    # Find file length from offset 2 (after CRC)
+    try:
+        file_length = struct.unpack_from("<I", data, 2)[0]
+    except struct.error:
+        file_length = len(data)
+
+    # Parse section pointer table (Section 0)
+    # Section 0 starts at offset 6 (after 2-byte CRC + 4-byte length)
+    # Each pointer entry: section_id(uint16) + section_index(uint32) + section_length(uint32) = 10 bytes
+    section_pointers = {}
+    ptr_offset = 6
+    try:
+        n_pointers_from_table = (struct.unpack_from("<I", data, ptr_offset + 2 + 2)[0] - 6) // 10
+    except struct.error:
+        n_pointers_from_table = 12
+
+    offset = ptr_offset + 6  # skip section 0 header
+    for _ in range(min(n_pointers_from_table, 20)):
+        try:
+            sec_id  = struct.unpack_from("<H", data, offset)[0]
+            sec_idx = struct.unpack_from("<I", data, offset + 2)[0]
+            sec_len = struct.unpack_from("<I", data, offset + 6)[0]
+            if sec_id < 20 and sec_idx > 0:
+                section_pointers[sec_id] = (sec_idx - 1, sec_len)
+            offset += 10
+        except struct.error:
+            break
+
+    # Try to decode Section 3 (lead identification) and Section 6 (rhythm data)
+    fs   = 500.0
+    leads_data = {}
+
+    # Section 1: patient data / header info (sampling frequency at known offset)
+    if 1 in section_pointers:
+        s1_off, s1_len = section_pointers[1]
+        try:
+            fs = float(struct.unpack_from("<H", data, s1_off + 6 + 10)[0])
+        except Exception:
+            pass
+
+    # Section 6: rhythm data (raw samples, one block per lead)
+    if 6 in section_pointers:
+        s6_off, s6_len = section_pointers[6]
+        # Section 6 header: 6 bytes (crc+len) + section body
+        body_off = s6_off + 6
+        try:
+            amp_factor = struct.unpack_from("<H", data, body_off + 2)[0] / 1000.0  # nV → μV usually
+            n_leads    = struct.unpack_from("<B", data, body_off + 4)[0]
+            n_samples  = struct.unpack_from("<I", data, body_off + 6)[0]
+            samp_off   = body_off + 10 + n_leads * 4  # skip lead offsets
+
+            for i in range(min(n_leads, 12)):
+                lead_name = CANONICAL_LEADS[i] if i < 12 else f"Lead{i+1}"
+                lead_data = np.frombuffer(
+                    data[samp_off + i*n_samples*2 : samp_off + (i+1)*n_samples*2],
+                    dtype=np.int16
+                ).astype(np.float32) * amp_factor * 1e-6  # → mV
+                leads_data[lead_name] = lead_data
+        except Exception:
+            pass
+
+    if not leads_data:
+        raise ValueError(
+            "Could not decode SCP-ECG binary data. "
+            "File may be corrupted or use an unsupported SCP variant."
+        )
+
+    n_samples = min(len(v) for v in leads_data.values())
+    signal    = np.zeros((n_samples, 12), dtype=np.float32)
+    for i, lead in enumerate(CANONICAL_LEADS):
+        if lead in leads_data:
+            signal[:, i] = leads_data[lead][:n_samples]
+
+    return ExtractionResult(
+        signal=signal,
+        fs=fs,
+        lead_names=list(leads_data.keys()),
+        n_samples=n_samples,
+        duration_s=n_samples / fs,
+        source_format="SCP-ECG",
+    )
+
+
+# ── Dispatcher ────────────────────────────────────────────────────────────────
+
+def extract_ecg(file_path: str, fmt: ECGFormat) -> ExtractionResult:
+    """
+    Extract ECG signal from file based on detected format.
+
+    Args:
+        file_path : absolute path to the file
+        fmt       : ECGFormat enum value from format_detector
+
+    Returns:
+        ExtractionResult with raw signal and metadata
+    """
+    dispatchers = {
+        ECGFormat.WFDB:  _extract_wfdb,
+        ECGFormat.DICOM: _extract_dicom,
+        ECGFormat.XML:   _extract_xml,
+        ECGFormat.SCP:   _extract_scp,
+    }
+
+    if fmt not in dispatchers:
+        raise ValueError(f"Unsupported ECG format: {fmt}")
+
+    return dispatchers[fmt](file_path)
+"""
+format_detector.py
+------------------
+Automatically identifies the ECG file format from:
+  1. File extension
+  2. Binary magic bytes (for ambiguous or renamed files)
+
+Supported formats:
+  - WFDB   (.hea / .dat pair or .hea alone)
+  - DICOM  (.dcm)
+  - XML    (.xml)   — covers HL7 aECG, Philips, GE, Schiller schemas
+  - SCP-ECG (.scp)
+"""
+
+import os
+from enum import Enum
+from typing import Optional
+
+
+class ECGFormat(str, Enum):
+    WFDB  = "WFDB"
+    DICOM = "DICOM"
+    XML   = "XML"
+    SCP   = "SCP-ECG"
+    UNKNOWN = "UNKNOWN"
+
+
+# ── Magic byte signatures ─────────────────────────────────────────────────────
+_DICOM_MAGIC_OFFSET = 128
+_DICOM_MAGIC        = b"DICM"
+_XML_MAGIC          = b"<?xml"
+_SCP_MAGIC_MIN_LEN  = 6   # SCP-ECG section 0 starts at byte 0, no fixed magic
+
+# Known SCP-ECG section CRC marker (first 2 bytes = section ID 0 = 0x0000)
+_SCP_SECTION_ID_0   = b"\x00\x00"
+
+
+def _read_header(path: str, n: int = 140) -> bytes:
+    try:
+        with open(path, "rb") as f:
+            return f.read(n)
+    except OSError:
+        return b""
+
+
+def _is_dicom(header: bytes) -> bool:
+    return len(header) >= 132 and header[128:132] == _DICOM_MAGIC
+
+
+def _is_xml(header: bytes) -> bool:
+    stripped = header.lstrip(b"\xef\xbb\xbf \t\r\n")   # strip BOM + whitespace
+    return stripped[:5] == _XML_MAGIC or stripped[:1] == b"<"
+
+
+def _is_scp(header: bytes, path: str) -> bool:
+    """
+    SCP-ECG: no universal magic, but:
+    - Extension .scp is the strongest indicator
+    - Binary file with first bytes = section 0 CRC (4 bytes) + section 0 ID (2 bytes = 0x0000)
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".scp":
+        return True
+    # Heuristic: binary file, starts with 4-byte CRC + 0x0000 section ID
+    if len(header) >= 6 and header[4:6] == _SCP_SECTION_ID_0:
+        return True
+    return False
+
+
+def _is_wfdb_header(path: str) -> bool:
+    """WFDB .hea files are plain text with specific first-line format."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".hea":
+        return True
+    try:
+        with open(path, "r", errors="ignore") as f:
+            first_line = f.readline().strip()
+        # WFDB header first line: <record_name> <n_signals> <fs> [<n_samples>] ...
+        parts = first_line.split()
+        if len(parts) >= 3 and parts[1].isdigit() and parts[2].replace(".", "").isdigit():
+            return True
+    except OSError:
+        pass
+    return False
+
+
+def detect_format(file_path: str) -> ECGFormat:
+    """
+    Detect the ECG format of the given file.
+
+    Args:
+        file_path: absolute path to the uploaded file
+
+    Returns:
+        ECGFormat enum value
+    """
+    ext    = os.path.splitext(file_path)[1].lower()
+    header = _read_header(file_path)
+
+    # ── Fast extension checks ─────────────────────────────────────────────────
+    if ext in (".hea", ".dat"):
+        return ECGFormat.WFDB
+
+    if ext == ".dcm":
+        return ECGFormat.DICOM
+
+    if ext == ".xml":
+        return ECGFormat.XML
+
+    if ext == ".scp":
+        return ECGFormat.SCP
+
+    # ── Magic byte fallback ───────────────────────────────────────────────────
+    if _is_dicom(header):
+        return ECGFormat.DICOM
+
+    if _is_xml(header):
+        return ECGFormat.XML
+
+    if _is_scp(header, file_path):
+        return ECGFormat.SCP
+
+    if _is_wfdb_header(file_path):
+        return ECGFormat.WFDB
+
+    return ECGFormat.UNKNOWN
+
+
+def get_format_display_name(fmt: ECGFormat) -> str:
+    names = {
+        ECGFormat.WFDB:    "WFDB (PhysioNet)",
+        ECGFormat.DICOM:   "DICOM ECG",
+        ECGFormat.XML:     "XML ECG (HL7 aECG / Vendor)",
+        ECGFormat.SCP:     "SCP-ECG",
+        ECGFormat.UNKNOWN: "Unknown",
+    }
+    return names.get(fmt, "Unknown")
+"""
+inference.py
+------------
+Loads the trained ResNet1D model and runs predictions on preprocessed ECG tensors.
+
+Model architecture MUST match the training definition in:
+  pipelines/train_resnet1d.py
+
+Input  : torch.Tensor of shape (1, 12, 1000)
+Output : dict with sigmoid probabilities for each class
+"""
+
+import os
+import torch
+import torch.nn as nn
+import numpy as np
+from typing import Dict
+
+# ── Label definitions (must match training order) ─────────────────────────────
+TARGET_LABELS = ["NORM", "MI", "STTC", "CD", "HYP"]
+
+LABEL_INFO = {
+    "NORM": {"name": "Normal ECG",               "color": "#22c55e"},
+    "MI":   {"name": "Myocardial Infarction",     "color": "#ef4444"},
+    "STTC": {"name": "ST/T Change",               "color": "#f97316"},
+    "CD":   {"name": "Conduction Disturbance",    "color": "#a855f7"},
+    "HYP":  {"name": "Hypertrophy",               "color": "#3b82f6"},
+}
+
+# ── Threshold for binary prediction ───────────────────────────────────────────
+THRESHOLD = 0.5
+
+# ── Default model path (relative to this file → ../../models/) ────────────────
+_DEFAULT_MODEL_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "models", "resnet1d.pth"
+)
+
+
+# ── Architecture ──────────────────────────────────────────────────────────────
+
+class ResBlock1D(nn.Module):
+    """Standard 1-D Residual Block — identical to training code."""
+    def __init__(self, in_ch: int, out_ch: int, stride: int = 1, kernel: int = 3):
+        super().__init__()
+        pad = kernel // 2
+        self.conv1    = nn.Conv1d(in_ch, out_ch, kernel, stride=stride, padding=pad, bias=False)
+        self.bn1      = nn.BatchNorm1d(out_ch)
+        self.relu     = nn.ReLU(inplace=True)
+        self.conv2    = nn.Conv1d(out_ch, out_ch, kernel, stride=1, padding=pad, bias=False)
+        self.bn2      = nn.BatchNorm1d(out_ch)
+        self.drop     = nn.Dropout(0.2)
+        self.shortcut = nn.Identity()
+        if stride != 1 or in_ch != out_ch:
+            self.shortcut = nn.Sequential(
+                nn.Conv1d(in_ch, out_ch, 1, stride=stride, bias=False),
+                nn.BatchNorm1d(out_ch),
+            )
+
+    def forward(self, x):
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.drop(self.bn2(self.conv2(out)))
+        return self.relu(out + self.shortcut(x))
+
+
+class ResNet1D(nn.Module):
+    """
+    4-stage 1-D ResNet for 12-lead ECG multi-label classification.
+    Exact replica of the trained architecture.
+    """
+    def __init__(self, in_channels: int = 12, num_classes: int = 5):
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv1d(in_channels, 64, kernel_size=15, stride=2, padding=7, bias=False),
+            nn.BatchNorm1d(64), nn.ReLU(inplace=True),
+        )
+        self.layer1 = nn.Sequential(ResBlock1D(64, 64, kernel=7), ResBlock1D(64, 64, kernel=7))
+        self.layer2 = nn.Sequential(ResBlock1D(64, 128, stride=2, kernel=5), ResBlock1D(128, 128, kernel=5))
+        self.layer3 = nn.Sequential(ResBlock1D(128, 256, stride=2, kernel=3), ResBlock1D(256, 256, kernel=3))
+        self.layer4 = nn.Sequential(ResBlock1D(256, 256, stride=2, kernel=3), ResBlock1D(256, 256, kernel=3))
+        self.pool       = nn.AdaptiveAvgPool1d(1)
+        self.classifier = nn.Sequential(nn.Flatten(), nn.Dropout(0.5), nn.Linear(256, num_classes))
+
+    def forward(self, x):
+        x = self.stem(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.pool(x)
+        return self.classifier(x)
+
+
+# ── Singleton model loader ────────────────────────────────────────────────────
+
+_model: ResNet1D | None = None
+_device: torch.device | None = None
+
+
+def load_model(model_path: str | None = None) -> ResNet1D:
+    """Load model once and cache globally. Thread-safe for single-worker."""
+    global _model, _device
+    if _model is not None:
+        return _model
+
+    path = model_path or _DEFAULT_MODEL_PATH
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Model file not found: {path}")
+
+    _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    _model  = ResNet1D(in_channels=12, num_classes=len(TARGET_LABELS))
+
+    state = torch.load(path, map_location=_device, weights_only=True)
+    _model.load_state_dict(state)
+    _model.to(_device)
+    _model.eval()
+    return _model
+
+
+def predict(tensor: torch.Tensor) -> Dict:
+    """
+    Run inference on a preprocessed ECG tensor.
+
+    Args:
+        tensor: shape (1, 12, 1000) — float32
+
+    Returns:
+        dict with keys:
+          probabilities : {label: float}  — sigmoid scores 0–1
+          predictions   : {label: bool}   — threshold 0.5
+          top_diagnosis : str             — highest-probability label
+          is_normal     : bool            — NORM > threshold AND no pathology
+          labels_info   : list of dicts for frontend rendering
+    """
+    model = load_model()
+
+    with torch.no_grad():
+        tensor = tensor.to(_device)
+        logits = model(tensor)                          # (1, 5)
+        probs  = torch.sigmoid(logits).cpu().numpy()[0] # (5,)
+
+    probabilities = {label: float(round(float(p), 4)) for label, p in zip(TARGET_LABELS, probs)}
+    predictions   = {label: bool(p >= THRESHOLD) for label, p in probabilities.items()}
+
+    # Determine top diagnosis (highest probability)
+    top_label = max(probabilities, key=probabilities.get)
+
+    # Normal if NORM is highest AND no other class exceeds threshold
+    pathology_active = any(predictions[l] for l in TARGET_LABELS if l != "NORM")
+    is_normal = predictions["NORM"] and not pathology_active
+
+    # Build rich label list for frontend
+    labels_info = []
+    for label in TARGET_LABELS:
+        prob  = probabilities[label]
+        info  = LABEL_INFO[label]
+        labels_info.append({
+            "code":       label,
+            "name":       info["name"],
+            "color":      info["color"],
+            "probability": prob,
+            "percent":    round(prob * 100, 1),
+            "predicted":  predictions[label],
+        })
+
+    # Sort by probability descending for display
+    labels_info.sort(key=lambda x: x["probability"], reverse=True)
+
+    return {
+        "probabilities":  probabilities,
+        "predictions":    predictions,
+        "top_diagnosis":  LABEL_INFO[top_label]["name"],
+        "top_code":       top_label,
+        "top_confidence": probabilities[top_label],
+        "is_normal":      is_normal,
+        "labels_info":    labels_info,
+    }
+"""
+preprocessing.py
+----------------
+Validates and prepares an extracted ECG signal for the ResNet1D model.
+
+Pipeline:
+  1. Validate 12 leads present
+  2. Reorder leads to PTB-XL canonical order
+  3. Resample to exactly TARGET_FS (100 Hz)
+  4. Trim or zero-pad to TARGET_LENGTH (1000 samples = 10 sec at 100 Hz)
+  5. Per-lead z-score normalisation: (x - mean) / (std + 1e-8)
+  6. Return torch.Tensor of shape (1, 12, 1000) — ready for model
+
+Model expects:
+  Input shape  : (B, 12, 1000)
+  Sampling rate: 100 Hz
+  Normalisation: per-lead z-score
+"""
+
+import numpy as np
+import torch
+from typing import Tuple
+from dataclasses import dataclass
+
+from ecg_extractor import ExtractionResult, CANONICAL_LEADS
+
+# ── Model constants ───────────────────────────────────────────────────────────
+TARGET_FS     = 100      # Hz — PTB-XL 100Hz dataset used for training
+TARGET_LENGTH = 1000     # samples — 10 seconds at 100 Hz
+N_LEADS       = 12
+
+
+@dataclass
+class PreprocessingResult:
+    tensor:       torch.Tensor   # (1, 12, 1000) float32
+    lead_order:   list           # canonical lead order applied
+    original_fs:  float          # input sampling frequency
+    resampled:    bool           # whether resampling was performed
+    padded:       bool           # whether zero-padding was applied
+    trimmed:      bool           # whether signal was trimmed
+
+
+# ── Validation ────────────────────────────────────────────────────────────────
+
+class ECGValidationError(ValueError):
+    """Raised when the ECG signal fails validation checks."""
+    pass
+
+
+def validate_leads(lead_names: list) -> list:
+    """
+    Ensure all 12 canonical leads are present.
+    Returns the normalised list of found canonical lead names.
+    Raises ECGValidationError if any are missing.
+    """
+    # Normalise: case-insensitive match
+    found = set()
+    for name in lead_names:
+        n = name.strip()
+        # Direct match
+        if n in CANONICAL_LEADS:
+            found.add(n)
+        else:
+            # Try upper-case match
+            for cl in CANONICAL_LEADS:
+                if n.upper() == cl.upper():
+                    found.add(cl)
+                    break
+
+    missing = [l for l in CANONICAL_LEADS if l not in found]
+    if missing:
+        raise ECGValidationError(
+            f"Missing leads: {missing}. "
+            f"Found: {list(found)}. "
+            f"All 12 leads required: {CANONICAL_LEADS}"
+        )
+
+    return CANONICAL_LEADS
+
+
+def validate_sampling_rate(fs: float) -> None:
+    """
+    Validate the sampling frequency is in a supported range.
+    Raises ECGValidationError for suspicious values.
+    """
+    if fs < 10:
+        raise ECGValidationError(f"Sampling rate too low: {fs} Hz (minimum 10 Hz)")
+    if fs > 10000:
+        raise ECGValidationError(f"Sampling rate unreasonably high: {fs} Hz (maximum 10000 Hz)")
+    if fs < 50:
+        raise ECGValidationError(
+            f"Sampling rate {fs} Hz is too low for reliable ECG analysis. "
+            f"Minimum recommended is 50 Hz; model was trained on 100 Hz."
+        )
+
+
+def validate_signal(signal: np.ndarray) -> None:
+    """Check for NaNs, Infs, and flat lines."""
+    if np.any(np.isnan(signal)):
+        raise ECGValidationError("ECG signal contains NaN values — file may be corrupted.")
+    if np.any(np.isinf(signal)):
+        raise ECGValidationError("ECG signal contains Inf values — file may be corrupted.")
+
+    # Check for completely flat leads (all identical values = disconnected electrode)
+    flat_leads = []
+    for i, lead in enumerate(CANONICAL_LEADS):
+        col = signal[:, i]
+        if col.std() < 1e-9 and not np.all(col == 0):  # 0 padding is ok, flat != 0 is bad
+            flat_leads.append(lead)
+    # Note: we warn but don't fail — some leads may genuinely be flat (e.g. pacemaker artefact)
+
+
+# ── Resampling ────────────────────────────────────────────────────────────────
+
+def _resample_signal(signal: np.ndarray, orig_fs: float, target_fs: float) -> np.ndarray:
+    """
+    Resample (N, 12) signal from orig_fs to target_fs using scipy.
+    Uses polyphase resampling for high quality.
+    """
+    try:
+        from scipy.signal import resample_poly
+        from math import gcd
+
+        orig_fs_int   = int(round(orig_fs))
+        target_fs_int = int(round(target_fs))
+        common        = gcd(orig_fs_int, target_fs_int)
+        up   = target_fs_int // common
+        down = orig_fs_int   // common
+
+        resampled = resample_poly(signal, up, down, axis=0)
+        return resampled.astype(np.float32)
+
+    except ImportError:
+        # Fallback: linear interpolation if scipy not available
+        n_orig   = signal.shape[0]
+        n_target = int(round(n_orig * target_fs / orig_fs))
+        x_orig   = np.linspace(0, 1, n_orig)
+        x_new    = np.linspace(0, 1, n_target)
+        resampled = np.zeros((n_target, signal.shape[1]), dtype=np.float32)
+        for i in range(signal.shape[1]):
+            resampled[:, i] = np.interp(x_new, x_orig, signal[:, i])
+        return resampled
+
+
+# ── Normalisation ─────────────────────────────────────────────────────────────
+
+def _normalise(signal: np.ndarray) -> np.ndarray:
+    """Per-lead z-score normalisation — matches training exactly."""
+    mean = signal.mean(axis=0, keepdims=True)          # (1, 12)
+    std  = signal.std(axis=0,  keepdims=True) + 1e-8   # (1, 12)
+    return ((signal - mean) / std).astype(np.float32)
+
+
+# ── Lead reordering ───────────────────────────────────────────────────────────
+
+def _reorder_leads(signal: np.ndarray, source_leads: list) -> np.ndarray:
+    """
+    Reorder columns of signal to match CANONICAL_LEADS order.
+    Missing leads are filled with zeros.
+    """
+    n = signal.shape[0]
+    out = np.zeros((n, 12), dtype=np.float32)
+
+    # Build index map: source_leads[i] → column i in signal
+    src_map = {}
+    for i, name in enumerate(source_leads):
+        for cl in CANONICAL_LEADS:
+            if name.upper() == cl.upper():
+                src_map[cl] = i
+                break
+
+    for j, canonical in enumerate(CANONICAL_LEADS):
+        if canonical in src_map:
+            out[:, j] = signal[:, src_map[canonical]]
+
+    return out
+
+
+# ── Main pipeline ─────────────────────────────────────────────────────────────
+
+def preprocess(extracted: ExtractionResult) -> PreprocessingResult:
+    """
+    Full preprocessing pipeline from ExtractionResult → model-ready tensor.
+
+    Steps:
+      1. Validate leads
+      2. Reorder to canonical order
+      3. Validate signal values
+      4. Validate sampling rate
+      5. Resample to 100 Hz if needed
+      6. Trim or pad to 1000 samples
+      7. Normalise per-lead z-score
+      8. Convert to (1, 12, 1000) torch.Tensor
+
+    Returns:
+        PreprocessingResult with tensor and metadata
+    """
+    signal     = extracted.signal.copy()   # (N, n_leads)
+    lead_names = extracted.lead_names
+    fs         = extracted.fs
+
+    # ── Step 1: Validate & reorder leads ─────────────────────────────────────
+    validate_leads(lead_names)
+    signal = _reorder_leads(signal, lead_names)
+
+    # ── Step 2: Validate signal sanity ───────────────────────────────────────
+    validate_signal(signal)
+
+    # ── Step 3: Validate sampling rate ───────────────────────────────────────
+    validate_sampling_rate(fs)
+
+    # ── Step 4: Resample if needed ────────────────────────────────────────────
+    resampled = False
+    if abs(fs - TARGET_FS) > 0.5:
+        signal    = _resample_signal(signal, fs, TARGET_FS)
+        resampled = True
+
+    # ── Step 5: Trim or zero-pad to TARGET_LENGTH ─────────────────────────────
+    n      = signal.shape[0]
+    padded = trimmed = False
+
+    if n > TARGET_LENGTH:
+        signal  = signal[:TARGET_LENGTH, :]
+        trimmed = True
+    elif n < TARGET_LENGTH:
+        pad    = np.zeros((TARGET_LENGTH - n, 12), dtype=np.float32)
+        signal = np.concatenate([signal, pad], axis=0)
+        padded = True
+
+    # ── Step 6: Per-lead z-score normalisation ────────────────────────────────
+    signal = _normalise(signal)
+
+    # ── Step 7: Convert to tensor (1, 12, 1000) ───────────────────────────────
+    # signal is currently (1000, 12) — transpose to (12, 1000) then add batch dim
+    tensor = torch.tensor(signal.T, dtype=torch.float32).unsqueeze(0)  # (1, 12, 1000)
+
+    return PreprocessingResult(
+        tensor=tensor,
+        lead_order=CANONICAL_LEADS,
+        original_fs=fs,
+        resampled=resampled,
+        padded=padded,
+        trimmed=trimmed,
+    )
+"""
+upload_handler.py
+-----------------
+Manages temporary ECG file storage during a request lifecycle.
+
+Handles:
+  - Single-file uploads (XML, DICOM, SCP-ECG)
+  - Dual-file WFDB uploads (.hea + .dat stored together)
+  - Session-based temp directories (auto-cleaned after prediction)
+"""
+
+import os
+import uuid
+import shutil
+import tempfile
+from typing import Optional
+
+
+# Temporary base directory inside the app folder
+_TMP_BASE = os.path.join(os.path.dirname(__file__), "..", "tmp_uploads")
+
+
+def _ensure_tmp_base():
+    os.makedirs(_TMP_BASE, exist_ok=True)
+
+
+class UploadSession:
+    """
+    Represents a single upload session with a unique ID.
+    Manages temp files and provides path resolution.
+    """
+
+    def __init__(self, session_id: str, directory: str):
+        self.session_id  = session_id
+        self.directory   = directory
+        self.files: list = []   # list of (original_filename, saved_path)
+
+    def add_file(self, original_name: str, content: bytes) -> str:
+        """Save file bytes to session directory. Returns the saved path."""
+        safe_name  = os.path.basename(original_name)
+        dest_path  = os.path.join(self.directory, safe_name)
+        with open(dest_path, "wb") as f:
+            f.write(content)
+        self.files.append((original_name, dest_path))
+        return dest_path
+
+    def get_primary_file(self) -> Optional[str]:
+        """
+        Returns the path to the primary ECG file:
+          - For WFDB: the .hea file
+          - For others: the only file
+        """
+        if not self.files:
+            return None
+
+        # Prefer .hea for WFDB sessions
+        for name, path in self.files:
+            if name.lower().endswith(".hea"):
+                return path
+
+        # Otherwise first file
+        return self.files[0][1]
+
+    def cleanup(self):
+        """Delete all session files and directory."""
+        try:
+            shutil.rmtree(self.directory, ignore_errors=True)
+        except Exception:
+            pass
+
+
+# ── In-memory session store ───────────────────────────────────────────────────
+_sessions: dict[str, UploadSession] = {}
+
+
+def create_session() -> UploadSession:
+    """Create a new upload session with a unique temp directory."""
+    _ensure_tmp_base()
+    session_id = str(uuid.uuid4())
+    session_dir = os.path.join(_TMP_BASE, session_id)
+    os.makedirs(session_dir, exist_ok=True)
+    session = UploadSession(session_id, session_dir)
+    _sessions[session_id] = session
+    return session
+
+
+def get_session(session_id: str) -> Optional[UploadSession]:
+    """Retrieve an existing session by ID."""
+    return _sessions.get(session_id)
+
+
+def cleanup_session(session_id: str):
+    """Remove session from memory and delete temp files."""
+    session = _sessions.pop(session_id, None)
+    if session:
+        session.cleanup()
+
+
+def cleanup_all():
+    """Emergency cleanup of all sessions (e.g., on server shutdown)."""
+    for session in list(_sessions.values()):
+        session.cleanup()
+    _sessions.clear()
+    try:
+        shutil.rmtree(_TMP_BASE, ignore_errors=True)
+    except Exception:
+        pass

@@ -1,3 +1,11 @@
 /ecg_env
 /preprocessed
 /extra
+*.dat
+*.hea
+*.scp
+*.mat
+/ECG - application/format sample
+/ECG - application/tmp_uploads
+/models
+/ECG - application/tmp_uploads

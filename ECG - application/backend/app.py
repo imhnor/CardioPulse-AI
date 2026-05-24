@@ -149,22 +149,21 @@ async def upload_ecg(files: list[UploadFile] = File(...)):
 
         # Identify WFDB pairing requirement
         names = [f.filename.lower() for f in files]
+        has_hea = any(n.endswith(".hea") for n in names)
+        has_dat = any(n.endswith(".dat") for n in names)
 
-        if any(n.endswith(".hea") for n in names):
-            if not any(n.endswith(".dat") for n in names):
-                cleanup_session(session.session_id)
-                raise HTTPException(
-                    status_code=400,
-                    detail="WFDB requires both .hea and .dat files"
-                )
+        if len(files) > 1 and not (has_hea and has_dat):
+            cleanup_session(session.session_id)
+            raise HTTPException(
+                status_code=400,
+                detail="If uploading multiple files, they must be a .hea and .dat pair."
+            )
 
         primary_path = session.get_primary_file()
         if not primary_path:
             raise HTTPException(status_code=400, detail="Could not determine primary ECG file.")
+        
         # Detect format
-        # WFDB special case handled above
-
-        # now safe to detect format
         fmt = detect_format(primary_path)
         # Extract signal
         try:
@@ -240,6 +239,8 @@ async def predict_ecg(session_id: str = Form(...)):
             raise HTTPException(status_code=500, detail=f"Model inference failed: {e}")
 
         # Build response
+        signal_list = prep.tensor[0].cpu().numpy().tolist()
+
         response = {
             "success":        True,
             "session_id":     session_id,
@@ -252,6 +253,7 @@ async def predict_ecg(session_id: str = Form(...)):
                 "trimmed":      prep.trimmed,
                 "lead_order":   prep.lead_order,
             },
+            "signal": signal_list,
         }
 
         return response
@@ -301,6 +303,8 @@ async def upload_and_predict(files: list[UploadFile] = File(...)):
         raise HTTPException(status_code=500, detail=f"Inference failed: {e}")
 
     cleanup_session(session_id)
+    
+    signal_list = prep.tensor[0].cpu().numpy().tolist()
 
     return {
         "success":       True,
@@ -311,5 +315,6 @@ async def upload_and_predict(files: list[UploadFile] = File(...)):
             "padded":      prep.padded,
             "trimmed":     prep.trimmed,
         },
+        "signal": signal_list,
         **prediction,
     }

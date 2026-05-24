@@ -61,7 +61,7 @@
 
 /* ── Reset ── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-html { font-size: 16px; scroll-behavior: smooth; }
+html { font-size: 16px; scroll-behavior: smooth; overflow-y: scroll; }
 body {
   font-family: var(--font-sans);
   background: var(--gray-50);
@@ -187,6 +187,12 @@ a { color: inherit; text-decoration: none; }
   gap: 1.5rem;
   align-items: start;
 }
+.content-grid.is-result-mode {
+  grid-template-columns: 1fr;
+}
+.content-grid.is-result-mode .left-col {
+  display: none;
+}
 .left-col, .right-col {
   display: flex;
   flex-direction: column;
@@ -233,7 +239,7 @@ a { color: inherit; text-decoration: none; }
 .drop-zone {
   border: 2px dashed var(--gray-300);
   border-radius: var(--radius);
-  padding: 2rem 1.5rem;
+  padding: 1rem 0.75rem;
   text-align: center;
   cursor: pointer;
   transition: all var(--transition);
@@ -268,7 +274,7 @@ a { color: inherit; text-decoration: none; }
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 10px 20px;
+  padding: 6px 12px;
   border-radius: var(--radius);
   font-size: 0.875rem;
   font-weight: 600;
@@ -390,7 +396,9 @@ a { color: inherit; text-decoration: none; }
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 1.25rem;
+  min-height: 600px;
 }
 .placeholder-ecg { width: 100%; max-width: 300px; color: var(--gray-300); }
 .placeholder-ecg svg { width: 100%; }
@@ -403,12 +411,18 @@ a { color: inherit; text-decoration: none; }
   display: flex;
   align-items: center;
   gap: 1.25rem;
+  margin: 1.5rem;
   padding: 1.5rem;
-  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(0,0,0,0.05);
+  box-shadow: var(--shadow-sm);
   transition: background var(--transition-slow);
 }
 .diagnosis-banner.normal   { background: linear-gradient(135deg, #f0fdf4, #dcfce7); }
-.diagnosis-banner.abnormal { background: linear-gradient(135deg, #fef2f2, #fee2e2); }
+.diagnosis-banner.abnormal { 
+  background: linear-gradient(135deg, #fef2f2, #fee2e2);
+  animation: abnormalPulse 2s infinite alternate;
+}
 
 .diagnosis-icon {
   width: 56px;
@@ -584,6 +598,10 @@ a { color: inherit; text-decoration: none; }
   0%   { stroke-dashoffset: 100; opacity: 0.7; }
   50%  { stroke-dashoffset: 0;   opacity: 1; }
   100% { stroke-dashoffset: -100; opacity: 0.7; }
+}
+@keyframes abnormalPulse {
+  0%   { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+  100% { box-shadow: 0 0 15px 0 rgba(239, 68, 68, 0.4); }
 }
 @keyframes spin {
   to { transform: rotate(360deg); }

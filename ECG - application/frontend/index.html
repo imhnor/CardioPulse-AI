@@ -4,10 +4,11 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ECG Predict — 12-Lead AI Diagnosis</title>
-  <meta name="description" content="AI-powered 12-lead ECG analysis. Upload your ECG file for instant ResNet1D-based cardiac diagnosis using the PTB-XL dataset." />
+  <meta name="description" content="AI-powered 12-lead ECG analysis. Upload your WFDB ECG record (.hea + .dat) for instant ResNet1D-based cardiac diagnosis using the PTB-XL dataset." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -37,10 +38,10 @@
 
     <!-- ── Hero ── -->
     <section class="hero">
-      <div class="hero-tag">ResNet1D · PTB-XL · 5-Class Multi-Label</div>
+      <div class="hero-tag">ResNet1D · PTB-XL · 5-Class Multi-Label · WFDB Input</div>
       <h1 class="hero-title">AI-Powered ECG Diagnosis</h1>
       <p class="hero-subtitle">
-        Upload a 12-lead ECG in any standard format. Our ResNet1D model analyses
+        Upload a 12-lead WFDB ECG record (.hea + .dat). Our ResNet1D model analyses
         morphology and rhythm to detect cardiac conditions with clinical-grade accuracy.
       </p>
     </section>
@@ -58,33 +59,45 @@
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
             </div>
             <div>
-              <h2 class="card-title">Upload ECG File</h2>
-              <p class="card-sub">Drag & drop or click to select</p>
+              <h2 class="card-title">Upload ECG Record</h2>
+              <p class="card-sub">Select format and upload file(s) — prediction starts automatically</p>
             </div>
           </div>
 
-          <!-- Drop Zone -->
-          <div class="drop-zone" id="dropZone" role="button" tabindex="0"
-               aria-label="Upload ECG file by clicking or dragging here">
-            <div class="drop-zone-content" id="dropZoneContent">
-              <div class="drop-icon">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="12" x2="12" y2="18"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
-              </div>
-              <p class="drop-title">Drop your ECG file here</p>
-              <p class="drop-hint">Supports: WFDB (.hea+.dat) · DICOM (.dcm) · XML (.xml) · SCP-ECG (.scp)</p>
-              <p class="drop-hint drop-hint--small">For WFDB: select both .hea and .dat files together</p>
-            </div>
+          <!-- Format Selector -->
+          <div class="format-selector" style="margin-bottom: 1rem;">
+            <label for="formatSelect" style="display:block; font-size: 0.85rem; font-weight:600; margin-bottom:0.5rem; color:var(--gray-700);">Input Format</label>
+            <select id="formatSelect" class="input-select" style="width: 100%; padding: 8px 12px; border-radius: var(--radius-sm); border: 1px solid var(--gray-300); font-family: var(--font-sans); background: var(--gray-50); outline: none;">
+              <option value="WFDB">Waveforms (WFDB .hea + .dat)</option>
+              <option value="CSV">CSV File (.csv)</option>
+              <option value="MAT">MATLAB File (.mat)</option>
+              <option value="SCP">SCP-ECG (.scp)</option>
+              <option value="XML">XML File (.xml)</option>
+            </select>
           </div>
 
-          <input type="file" id="fileInput" multiple
-                 accept=".hea,.dat,.dcm,.xml,.scp"
-                 style="display:none" aria-label="ECG file input" />
+          <!-- New File Input Buttons -->
+          <div class="file-buttons" style="display:flex;flex-direction:column;gap:0.75rem;">
+            <label class="btn btn--primary btn--full" for="heaInput" id="heaInputLabel">Select .hea file</label>
+            <input type="file" id="heaInput" style="display:none" aria-label="Header file" />
+            <div class="file-name" id="heaFileName" style="font-size:0.85rem;color:var(--gray-600);text-align:center;">No file selected</div>
+            
+            <div id="datInputContainer">
+              <label class="btn btn--primary btn--full" for="datInput" id="datInputLabel">Select .dat file</label>
+              <input type="file" id="datInput" accept=".dat" style="display:none" aria-label="Signal file (.dat)" />
+              <div class="file-name" id="datFileName" style="font-size:0.85rem;color:var(--gray-600);text-align:center;">No .dat file selected</div>
+            </div>
+            
+            <button class="btn btn--primary btn--full" id="detectBtn">Detect</button>
+          </div>
 
-          <button class="btn btn--primary btn--full" id="browseBtn">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-            Choose File(s)
-          </button>
+          <!-- Status row: shown when one or both selected -->
+          <div class="wfdb-status" id="wfdbStatus" style="display:none">
+            <span id="wfdbStatusText"></span>
+          </div>
+
         </div>
+
 
         <!-- Info Card: ECG Details (shown after upload) -->
         <div class="card card--hidden" id="infoCard">
@@ -93,7 +106,7 @@
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
             </div>
             <div>
-              <h2 class="card-title">ECG Loaded</h2>
+              <h2 class="card-title">WFDB Record Loaded</h2>
               <p class="card-sub" id="infoFormatDisplay">—</p>
             </div>
           </div>
@@ -132,14 +145,28 @@
           </div>
 
           <!-- Predict Button -->
-          <button class="btn btn--primary btn--full btn--predict" id="predictBtn">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
-            Run AI Diagnosis
-          </button>
 
-          <button class="btn btn--ghost btn--full" id="resetBtn">
-            Upload different file
-          </button>
+        </div>
+
+        <!-- Model Info Sidebar -->
+        <div class="card model-info-card" style="margin-top: 1.5rem;">
+          <h3 class="section-title" style="margin-bottom:1rem">Model Information</h3>
+          <div class="model-specs">
+            <div class="spec-row"><span>Architecture</span><span class="mono">ResNet1D</span></div>
+            <div class="spec-row"><span>Dataset</span><span class="mono">PTB-XL</span></div>
+            <div class="spec-row"><span>Input Format</span><span class="mono">Multi-format</span></div>
+            <div class="spec-row"><span>Input Shape</span><span class="mono">(1, 12, 1000)</span></div>
+            <div class="spec-row"><span>Sampling</span><span class="mono">100 Hz</span></div>
+            <div class="spec-row"><span>Parameters</span><span class="mono">~2.0 M</span></div>
+            <div class="spec-row"><span>AUROC</span><span class="mono">0.90–0.93</span></div>
+          </div>
+          <div class="label-list">
+            <div class="label-item" style="--c:#22c55e"><span class="label-dot"></span><span class="label-code">NORM</span><span class="label-name">Normal ECG</span></div>
+            <div class="label-item" style="--c:#ef4444"><span class="label-dot"></span><span class="label-code">MI</span><span class="label-name">Myocardial Infarction</span></div>
+            <div class="label-item" style="--c:#f97316"><span class="label-dot"></span><span class="label-code">STTC</span><span class="label-name">ST/T Change</span></div>
+            <div class="label-item" style="--c:#a855f7"><span class="label-dot"></span><span class="label-code">CD</span><span class="label-name">Conduction Disturbance</span></div>
+            <div class="label-item" style="--c:#3b82f6"><span class="label-dot"></span><span class="label-code">HYP</span><span class="label-name">Hypertrophy</span></div>
+          </div>
         </div>
 
         <!-- Processing Status Card -->
@@ -159,7 +186,7 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg>
               </div>
               <div class="step-body">
-                <span class="step-name">Uploading file</span>
+                <span class="step-name">Uploading WFDB record</span>
                 <span class="step-desc" id="step-upload-desc">—</span>
               </div>
             </div>
@@ -177,7 +204,7 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg>
               </div>
               <div class="step-body">
-                <span class="step-name">Extracting 12 leads</span>
+                <span class="step-name">Extracting 12 leads via WFDB</span>
                 <span class="step-desc" id="step-extract-desc">—</span>
               </div>
             </div>
@@ -214,7 +241,7 @@
               <polyline points="0,40 20,40 30,15 40,65 50,25 60,55 70,40 90,40 100,40 110,20 120,60 130,35 140,45 150,40 170,40 180,40 190,18 200,62 210,28 220,52 230,40 250,40 260,40 270,22 280,58 290,40 300,40"/>
             </svg>
           </div>
-          <p class="placeholder-text">Upload an ECG file and run analysis to see results here</p>
+          <p class="placeholder-text">Upload an ECG record (WFDB, CSV, MAT, SCP, XML) and run analysis to see results and waveform here</p>
         </div>
 
         <!-- Result Card (shown after prediction) -->
@@ -227,6 +254,24 @@
               <div class="diagnosis-name" id="diagnosisName">—</div>
               <div class="diagnosis-confidence" id="diagnosisConfidence">—</div>
             </div>
+          <div id="avgConfidence" class="avg-confidence"></div>
+          </div>
+
+          <!-- 12-Lead Waveform Viewer -->
+          <div class="waveform-section">
+            <div class="waveform-header">
+              <h3 class="section-title">12-Lead ECG Waveform</h3>
+              <div class="waveform-controls">
+                <button class="waveform-btn active" id="btnWaveAll" onclick="setWaveView('all')">All Leads</button>
+                <button class="waveform-btn" id="btnWaveLimb" onclick="setWaveView('limb')">Limb</button>
+                <button class="waveform-btn" id="btnWaveChest" onclick="setWaveView('chest')">Chest</button>
+                <button class="waveform-btn" id="btnDownload" onclick="downloadECG()" style="margin-left: 10px; border-color: var(--blue-500); color: var(--blue-600);">
+                  <svg style="width:14px; height:14px; display:inline-block; vertical-align:middle; margin-right:4px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  Save PNG
+                </button>
+              </div>
+            </div>
+            <div id="waveformPlot" class="waveform-plot"></div>
           </div>
 
           <!-- Class Probabilities -->
@@ -267,25 +312,7 @@
           <button class="btn btn--ghost btn--full" id="errorResetBtn">Try Again</button>
         </div>
 
-        <!-- Model Info Sidebar -->
-        <div class="card model-info-card">
-          <h3 class="section-title" style="margin-bottom:1rem">Model Information</h3>
-          <div class="model-specs">
-            <div class="spec-row"><span>Architecture</span><span class="mono">ResNet1D</span></div>
-            <div class="spec-row"><span>Dataset</span><span class="mono">PTB-XL</span></div>
-            <div class="spec-row"><span>Input</span><span class="mono">(1, 12, 1000)</span></div>
-            <div class="spec-row"><span>Sampling</span><span class="mono">100 Hz</span></div>
-            <div class="spec-row"><span>Parameters</span><span class="mono">~2.0 M</span></div>
-            <div class="spec-row"><span>AUROC</span><span class="mono">0.90–0.93</span></div>
-          </div>
-          <div class="label-list">
-            <div class="label-item" style="--c:#22c55e"><span class="label-dot"></span><span class="label-code">NORM</span><span class="label-name">Normal ECG</span></div>
-            <div class="label-item" style="--c:#ef4444"><span class="label-dot"></span><span class="label-code">MI</span><span class="label-name">Myocardial Infarction</span></div>
-            <div class="label-item" style="--c:#f97316"><span class="label-dot"></span><span class="label-code">STTC</span><span class="label-name">ST/T Change</span></div>
-            <div class="label-item" style="--c:#a855f7"><span class="label-dot"></span><span class="label-code">CD</span><span class="label-name">Conduction Disturbance</span></div>
-            <div class="label-item" style="--c:#3b82f6"><span class="label-dot"></span><span class="label-code">HYP</span><span class="label-name">Hypertrophy</span></div>
-          </div>
-        </div>
+
 
       </div><!-- /right-col -->
     </div><!-- /content-grid -->
@@ -293,7 +320,7 @@
 
   <!-- ── Footer ── -->
   <footer class="footer">
-    <p>ECGPredict · ResNet1D trained on PTB-XL · 12-lead multi-label classification · Research use only</p>
+    <p>ECGPredict · ResNet1D trained on PTB-XL · Multi-format 12-lead input · Research use only</p>
   </footer>
 
   <script src="app.js"></script>

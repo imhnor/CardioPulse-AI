@@ -1,440 +1,361 @@
-/**
- * app.js — ECGPredict Frontend Logic
- *
- * Handles:
- *  - Drag & drop + file picker upload
- *  - Two-step API flow: /api/upload → /api/predict
- *  - Step-by-step processing status updates
- *  - Result rendering (confidence bars, diagnosis banner, preprocessing info)
- *  - Error display with descriptive messages
- *  - Server health polling
- */
-
 'use strict';
 
-// ── Config ────────────────────────────────────────────────────────────────────
+// ── Config ────────────────────────────────────────────────────────────────
 const API_BASE = 'http://localhost:8000';
-
-// Label colours must match backend LABEL_INFO
-const LABEL_COLORS = {
-  NORM: '#22c55e',
-  MI:   '#ef4444',
-  STTC: '#f97316',
-  CD:   '#a855f7',
-  HYP:  '#3b82f6',
-};
 
 const CANONICAL_LEADS = ['I','II','III','aVR','aVL','aVF','V1','V2','V3','V4','V5','V6'];
 
-// ── State ─────────────────────────────────────────────────────────────────────
-let uploadedSessionId  = null;
-let uploadedFileInfo   = null;
-let isProcessing       = false;
+// ── State ────────────────────────────────────────────────────────────────
+let heaFile = null;
+let datFile = null;
+let isProcessing = false;
 
-// ── DOM References ────────────────────────────────────────────────────────────
-const $ = id => document.getElementById(id);
+// ── DOM Helper ───────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
 
-const dropZone        = $('dropZone');
-const fileInput       = $('fileInput');
-const browseBtn       = $('browseBtn');
-const uploadCard      = $('uploadCard');
-const infoCard        = $('infoCard');
-const processingCard  = $('processingCard');
+// Inputs
+const heaInput = $('heaInput');
+const datInput = $('datInput');
+
+// UI Elements
+const wfdbStatus = $('wfdbStatus');
+const wfdbStatusTxt = $('wfdbStatusText');
+
+const uploadCard = $('uploadCard');
+const processingCard = $('processingCard');
+const resultCard = $('resultCard');
+const errorCard = $('errorCard');
 const placeholderCard = $('placeholderCard');
-const resultCard      = $('resultCard');
-const errorCard       = $('errorCard');
-const predictBtn      = $('predictBtn');
-const resetBtn        = $('resetBtn');
-const resultResetBtn  = $('resultResetBtn');
-const errorResetBtn   = $('errorResetBtn');
-const serverDot       = $('serverDot');
-const serverStatus    = $('serverStatus');
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+const detectBtn = $('detectBtn');
 
+// File labels (FIXED IDs)
+const heaFileName = $('heaFileName');
+const datFileName = $('datFileName');
+
+const formatSelect = $('formatSelect');
+
+// ── Helpers ───────────────────────────────────────────────────────────────
 function show(el) { el.classList.remove('card--hidden'); }
 function hide(el) { el.classList.add('card--hidden'); }
 
-function setStep(stepId, state, desc = '') {
-  const step    = $(stepId);
-  const iconEl  = step.querySelector('.step-icon');
-  const descEl  = $(`${stepId}-desc`);
-
-  // Remove all state classes
-  iconEl.className = 'step-icon';
-
-  const icons = {
-    waiting: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg>`,
-    running: `<svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 11-6.219-8.56"/></svg>`,
-    done:    `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>`,
-    error:   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>`,
-  };
-
-  iconEl.innerHTML = icons[state] || icons.waiting;
-  iconEl.classList.add(`step-icon--${state}`);
-
-  if (desc) {
-    descEl.textContent = desc;
-    descEl.className   = 'step-desc ' + (state === 'error' ? 'error' : state === 'done' ? 'done' : '');
-  }
-}
-
-function resetAllSteps() {
-  ['step-upload','step-detect','step-extract','step-preprocess','step-infer'].forEach(id => {
-    setStep(id, 'waiting', '—');
-  });
-}
-
-function formatHz(hz) {
-  return `${Math.round(hz)} Hz`;
-}
-
-function formatDuration(s) {
-  if (s < 60) return `${s.toFixed(1)} s`;
-  const m = Math.floor(s / 60);
-  const rem = (s % 60).toFixed(0);
-  return `${m}m ${rem}s`;
-}
-
-// ── Server Health ─────────────────────────────────────────────────────────────
-
-async function checkHealth() {
-  try {
-    const res  = await fetch(`${API_BASE}/api/health`, { signal: AbortSignal.timeout(3000) });
-    const data = await res.json();
-    if (data.status === 'ok') {
-      serverDot.className    = 'badge-dot online';
-      serverStatus.textContent = data.model_loaded ? 'Model Ready' : 'Server Online (no model)';
-    } else {
-      throw new Error('bad status');
-    }
-  } catch {
-    serverDot.className      = 'badge-dot offline';
-    serverStatus.textContent = 'Server Offline';
-  }
-}
-
-// Poll every 10 seconds
-checkHealth();
-setInterval(checkHealth, 10_000);
-
-// ── Upload Flow ───────────────────────────────────────────────────────────────
-
-function handleFiles(files) {
-  if (isProcessing) return;
-  if (!files || files.length === 0) return;
-
-  // Validate extensions
-  const allowed = ['.hea', '.dat', '.dcm', '.xml', '.scp'];
-  const invalid = [...files].filter(f => {
-    const ext = '.' + f.name.split('.').pop().toLowerCase();
-    return !allowed.includes(ext);
-  });
-
-  if (invalid.length > 0) {
-    showError(`Unsupported file type: "${invalid[0].name}". Accepted formats: WFDB (.hea+.dat), DICOM (.dcm), XML (.xml), SCP-ECG (.scp)`);
-    return;
-  }
-
-  uploadFiles(files);
-}
-
-async function uploadFiles(files) {
-  isProcessing = true;
-  resetAllSteps();
-  hideAllResults();
-
-  hide(uploadCard);
-  show(processingCard);
-  $('processingMessage').textContent = 'Uploading ECG file...';
-
-  setStep('step-upload', 'running', 'Sending to server...');
-
-  const formData = new FormData();
-  [...files].forEach(f => formData.append('files', f));
-
-  let uploadData;
-  try {
-    const res = await fetch(`${API_BASE}/api/upload`, {
-      method: 'POST',
-      body:   formData,
-    });
-
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new Error(err.detail || `Upload failed (HTTP ${res.status})`);
-    }
-
-    uploadData = await res.json();
-  } catch (e) {
-    setStep('step-upload', 'error', e.message);
-    showError(e.message);
-    isProcessing = false;
-    return;
-  }
-
-  setStep('step-upload', 'done', `${[...files].map(f => f.name).join(' + ')}`);
-
-  // Format detection result
-  setStep('step-detect', 'done', uploadData.format_display);
-
-  // Lead extraction result
-  const nLeads = uploadData.n_leads;
-  setStep('step-extract', 'done', `${nLeads} leads · ${formatHz(uploadData.fs)} · ${formatDuration(uploadData.duration_s)}`);
-
-  // Store session
-  uploadedSessionId = uploadData.session_id;
-  uploadedFileInfo  = uploadData;
-
-  // Show ECG info card and wait for predict button
-  populateInfoCard(uploadData);
+function showError(msg) {
   hide(processingCard);
-  show(infoCard);
-  $('processingMessage').textContent = 'Ready for analysis';
-  isProcessing = false;
-}
-
-function populateInfoCard(data) {
-  $('infoFormatDisplay').textContent = data.format_display;
-  $('infoFormat').textContent        = data.format_display;
-  $('infoLeads').textContent         = `${data.n_leads} / 12`;
-  $('infoFs').textContent            = formatHz(data.fs);
-  $('infoDuration').textContent      = formatDuration(data.duration_s);
-  $('infoSamples').textContent       = data.n_samples.toLocaleString();
-
-  // Patient info
-  const pi = data.patient_info || {};
-  const patParts = [];
-  if (pi.PatientName && pi.PatientName !== 'None') patParts.push(pi.PatientName);
-  if (pi.PatientAge)  patParts.push(`Age ${pi.PatientAge}`);
-  if (pi.PatientSex)  patParts.push(pi.PatientSex);
-  $('infoPatient').textContent = patParts.length ? patParts.join(' · ') : 'Not available';
-
-  // Lead pills — show canonical 12, grey out missing
-  const foundSet    = new Set(data.lead_names.map(l => l.toUpperCase()));
-  const pillsEl     = $('leadsPills');
-  pillsEl.innerHTML = '';
-  CANONICAL_LEADS.forEach(lead => {
-    const pill    = document.createElement('span');
-    pill.className = 'lead-pill';
-    pill.textContent = lead;
-    // Try to find this lead in found set
-    const found = [...foundSet].some(l => l === lead.toUpperCase());
-    if (!found) pill.classList.add('missing');
-    pillsEl.appendChild(pill);
-  });
-}
-
-// ── Predict Flow ──────────────────────────────────────────────────────────────
-
-async function runPrediction() {
-  if (!uploadedSessionId || isProcessing) return;
-  isProcessing = true;
-
-  hide(infoCard);
-  resetAllSteps();
-  // Replay completed steps from upload
-  setStep('step-upload',  'done', 'File uploaded');
-  setStep('step-detect',  'done', uploadedFileInfo.format_display);
-  setStep('step-extract', 'done', `${uploadedFileInfo.n_leads} leads · ${formatHz(uploadedFileInfo.fs)}`);
-  setStep('step-preprocess', 'running', 'Resampling & normalising...');
-  $('processingMessage').textContent = 'Running AI analysis...';
-  show(processingCard);
-
-  await sleep(300);
-  setStep('step-preprocess', 'done', `100 Hz · z-score norm · (1, 12, 1000)`);
-  setStep('step-infer', 'running', 'ResNet1D forward pass...');
-
-  const formData = new FormData();
-  formData.append('session_id', uploadedSessionId);
-
-  let predData;
-  try {
-    const res = await fetch(`${API_BASE}/api/predict`, {
-      method: 'POST',
-      body:   formData,
-    });
-
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new Error(err.detail || `Prediction failed (HTTP ${res.status})`);
-    }
-
-    predData = await res.json();
-  } catch (e) {
-    setStep('step-infer', 'error', e.message);
-    showError(e.message);
-    isProcessing = false;
-    uploadedSessionId = null;
-    return;
-  }
-
-  setStep('step-infer', 'done', `Done — ${predData.top_diagnosis}`);
-  $('processingMessage').textContent = 'Analysis complete!';
-
-  await sleep(400);
-  hide(processingCard);
-  renderResult(predData);
-  isProcessing = false;
-  uploadedSessionId = null;
-}
-
-function renderResult(data) {
-  // ── Diagnosis Banner ──────────────────────────────────────────────────────
-  const banner = $('diagnosisBanner');
-  const icon   = $('diagnosisIcon');
-  const status = $('diagnosisStatus');
-  const name   = $('diagnosisName');
-  const conf   = $('diagnosisConfidence');
-
-  if (data.is_normal) {
-    banner.className = 'diagnosis-banner normal';
-    icon.className   = 'diagnosis-icon normal';
-    icon.textContent = '✅';
-    status.className = 'diagnosis-status normal';
-    status.textContent = '✓ Normal';
-  } else {
-    banner.className = 'diagnosis-banner abnormal';
-    icon.className   = 'diagnosis-icon abnormal';
-    icon.textContent = '⚠️';
-    status.className = 'diagnosis-status abnormal';
-    status.textContent = '⚠ Abnormal — Pathology Detected';
-  }
-
-  name.textContent = data.top_diagnosis;
-  conf.textContent = `Confidence: ${(data.top_confidence * 100).toFixed(1)}%`;
-
-  // ── Probability Bars ──────────────────────────────────────────────────────
-  const probaList = $('probaList');
-  probaList.innerHTML = '';
-
-  (data.labels_info || []).forEach(label => {
-    const item = document.createElement('div');
-    item.className = 'proba-item fade-in';
-
-    const pct    = label.percent;
-    const active = label.predicted;
-    const color  = LABEL_COLORS[label.code] || '#888';
-
-    item.innerHTML = `
-      <span class="proba-code">${label.code}</span>
-      <div class="proba-bar-wrap">
-        <div class="proba-bar" style="width:0%;background:${color}" data-target="${pct}"></div>
-      </div>
-      <span class="proba-pct">${pct}%</span>
-      <span class="proba-badge ${active ? 'active' : 'inactive'}">${active ? 'HIGH' : '—'}</span>
-    `;
-    probaList.appendChild(item);
-  });
-
-  // Animate bars after DOM paint
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      probaList.querySelectorAll('.proba-bar').forEach(bar => {
-        bar.style.width = bar.dataset.target + '%';
-      });
-    });
-  });
-
-  // ── Preprocessing Tags ────────────────────────────────────────────────────
-  const prepTags = $('prepTags');
-  prepTags.innerHTML = '';
-  const prep = data.preprocessing || {};
-
-  const tags = [
-    { label: `Input: ${prep.original_fs} Hz`,  highlight: false },
-    { label: `→ 100 Hz${prep.resampled ? ' (resampled)' : ''}`, highlight: prep.resampled },
-    { label: '1000 samples',                   highlight: false },
-    { label: 'z-score normalised',             highlight: false },
-    { label: '(1, 12, 1000) tensor',           highlight: false },
-  ];
-  if (prep.padded)  tags.push({ label: 'Zero-padded',  highlight: true });
-  if (prep.trimmed) tags.push({ label: 'Trimmed',      highlight: true });
-
-  tags.forEach(t => {
-    const tag       = document.createElement('span');
-    tag.className   = 'prep-tag' + (t.highlight ? ' highlight' : '');
-    tag.textContent = t.label;
-    prepTags.appendChild(tag);
-  });
-
-  show(resultCard);
-}
-
-// ── Error Display ─────────────────────────────────────────────────────────────
-
-function showError(message) {
-  hideAllResults();
-  hide(processingCard);
-  hide(infoCard);
+  hide(resultCard);
   show(uploadCard);
-  $('errorMessage').textContent = message;
+
+  $('errorMessage').textContent = msg;
   show(errorCard);
 }
 
-function hideAllResults() {
-  hide(resultCard);
-  hide(errorCard);
+function updateStatus() {
+  const fmt = formatSelect.value;
+  wfdbStatus.style.display = 'flex';
+
+  if (fmt === 'WFDB') {
+    if (!heaFile || !datFile) {
+      wfdbStatusTxt.textContent = 'Waiting for both .hea and .dat files';
+      detectBtn.disabled = true;
+      return;
+    }
+    const h = heaFile.name.replace(/\.hea$/i,'').toLowerCase();
+    const d = datFile.name.replace(/\.dat$/i,'').toLowerCase();
+    if (h !== d) {
+      wfdbStatusTxt.textContent = 'File names must match';
+      detectBtn.disabled = true;
+      return;
+    }
+  } else {
+    if (!heaFile) {
+      wfdbStatusTxt.textContent = `Waiting for file`;
+      detectBtn.disabled = true;
+      return;
+    }
+  }
+
+  wfdbStatusTxt.textContent = 'Ready — click Detect';
+  detectBtn.disabled = false;
 }
 
-// ── Reset ─────────────────────────────────────────────────────────────────────
+// ── File Handlers ───────────────────────────────────────────────────────
+formatSelect.addEventListener('change', () => {
+  const fmt = formatSelect.value;
+  if (fmt === 'WFDB') {
+    $('datInputContainer').style.display = 'block';
+    $('heaInputLabel').textContent = 'Select .hea file';
+    heaInput.accept = '.hea';
+  } else {
+    $('datInputContainer').style.display = 'none';
+    const exts = { 'CSV': '.csv', 'MAT': '.mat', 'SCP': '.scp', 'XML': '.xml' };
+    $('heaInputLabel').textContent = `Select ${exts[fmt]} file`;
+    heaInput.accept = exts[fmt];
+    datFile = null;
+    $('datFileName').textContent = 'No .dat file selected';
+  }
+  updateStatus();
+});
 
-function resetToUpload() {
-  uploadedSessionId = null;
-  uploadedFileInfo  = null;
-  isProcessing      = false;
-  fileInput.value   = '';
-  hide(infoCard);
-  hide(processingCard);
+heaInput.addEventListener('change', (e) => {
+  heaFile = e.target.files?.[0] || null;
+  heaFileName.textContent = heaFile ? heaFile.name : 'No file selected';
+  updateStatus();
+});
+
+datInput.addEventListener('change', (e) => {
+  datFile = e.target.files?.[0] || null;
+  datFileName.textContent = datFile ? datFile.name : 'No .dat file selected';
+  updateStatus();
+});
+
+// ── Upload + Predict ─────────────────────────────────────────────────────
+async function startPipeline() {
+  if (isProcessing) return;
+
+  const fmt = formatSelect.value;
+  if (fmt === 'WFDB' && (!heaFile || !datFile)) {
+    showError("Please select both .hea and .dat files");
+    return;
+  }
+  if (fmt !== 'WFDB' && !heaFile) {
+    showError("Please select a file to upload");
+    return;
+  }
+
+  isProcessing = true;
+
+  hide(errorCard);
   hide(resultCard);
+  hide(uploadCard);
+  show(processingCard);
+
+  try {
+    // ── Upload ─────────────────────────────────────────────
+    const formData = new FormData();
+    formData.append('files', heaFile, heaFile.name);
+    if (fmt === 'WFDB') {
+      formData.append('files', datFile, datFile.name);
+    }
+
+    const res = await fetch(`${API_BASE}/api/upload`, {
+      method: 'POST',
+      body: formData
+    });
+
+    const uploadData = await res.json();
+
+    if (!res.ok) {
+      throw new Error(uploadData.detail || 'Upload failed');
+    }
+
+    // ── Predict ───────────────────────────────────────────
+    const predForm = new FormData();
+    predForm.append('session_id', uploadData.session_id);
+
+    const predRes = await fetch(`${API_BASE}/api/predict`, {
+      method: 'POST',
+      body: predForm
+    });
+
+    const predData = await predRes.json();
+
+    if (!predRes.ok) {
+      throw new Error(predData.detail || 'Prediction failed');
+    }
+
+    hide(processingCard);
+    renderResult(predData);
+
+  } catch (err) {
+    showError(err.message);
+  }
+
+  isProcessing = false;
+}
+
+let currentSignal = null;
+let currentWaveView = 'all';
+
+// ── Result ───────────────────────────────────────────────────────────────
+function renderResult(data) {
+  show(resultCard);
+  document.querySelector('.content-grid').classList.add('is-result-mode');
+
+  $('diagnosisName').textContent = data.top_diagnosis || "Unknown";
+  $('diagnosisConfidence').textContent =
+    ((data.top_confidence || 0) * 100).toFixed(1) + "%";
+
+  const banner = $('diagnosisBanner');
+  banner.className = data.is_normal ? 'normal' : 'abnormal';
+
+  if (data.labels_info) {
+    const probaList = $('probaList');
+    probaList.innerHTML = '';
+    data.labels_info.forEach(info => {
+      const row = document.createElement('div');
+      row.className = 'proba-row';
+      row.innerHTML = `
+        <span class="proba-name" style="color: ${info.color}">${info.name}</span>
+        <div class="proba-bar-bg"><div class="proba-bar-fg" style="width: ${info.percent}%; background: ${info.color}"></div></div>
+        <span class="proba-val">${info.percent}%</span>
+      `;
+      probaList.appendChild(row);
+    });
+  }
+
+  if (data.preprocessing) {
+    const prepTags = $('prepTags');
+    prepTags.innerHTML = '';
+    const addTag = (text) => {
+      const t = document.createElement('span');
+      t.className = 'prep-tag';
+      t.textContent = text;
+      prepTags.appendChild(t);
+    };
+    if (data.preprocessing.resampled) addTag(`Resampled to ${data.preprocessing.target_fs}Hz`);
+    if (data.preprocessing.padded) addTag('Padded to 10s');
+    if (data.preprocessing.trimmed) addTag('Trimmed to 10s');
+  }
+
+  if (data.signal) {
+    currentSignal = data.signal;
+    renderWaveform();
+  }
+}
+
+function setWaveView(view) {
+  currentWaveView = view;
+  ['All', 'Limb', 'Chest'].forEach(v => {
+    const btn = $('btnWave' + v);
+    if (btn) btn.classList.remove('active');
+  });
+  const activeBtn = $('btnWave' + view.charAt(0).toUpperCase() + view.slice(1));
+  if (activeBtn) activeBtn.classList.add('active');
+  if (currentSignal) renderWaveform();
+}
+window.setWaveView = setWaveView;
+
+// ── Waveform ─────────────────────────────────────────────────────────────
+// ── Waveform ─────────────────────────────────────────────────────────────
+function renderWaveform() {
+  if (!currentSignal) return;
+  const fs = 100;
+  const n = currentSignal[0].length;
+
+  // Clinical 12-lead layout with Red Grid
+  const traces = [];
+  
+  if (currentWaveView === 'all') {
+    // 3x4 layout + 1 rhythm strip
+    const rowOffsets = [15, 10, 5];
+    const gridMap = [
+      [0, 3, 6, 9],  // I, aVR, V1, V4
+      [1, 4, 7, 10], // II, aVL, V2, V5
+      [2, 5, 8, 11]  // III, aVF, V3, V6
+    ];
+
+    for (let r = 0; r < 3; r++) {
+      for (let c = 0; c < 4; c++) {
+        let leadIdx = gridMap[r][c];
+        let startIdx = parseInt(c * 2.5 * fs);
+        let endIdx = parseInt((c + 1) * 2.5 * fs);
+        
+        let x = Array.from({length: endIdx - startIdx}, (_, i) => (startIdx + i) / fs);
+        let y = currentSignal[leadIdx].slice(startIdx, endIdx).map(v => v + rowOffsets[r]);
+        
+        traces.push({ x: x, y: y, mode: 'lines', line: { color: 'black', width: 1.5 }, hoverinfo: 'none' });
+        // Lead Label
+        traces.push({
+          x: [c * 2.5 + 0.1], y: [rowOffsets[r] + 1.2],
+          mode: 'text', text: [CANONICAL_LEADS[leadIdx]],
+          textposition: 'top right', textfont: { size: 14, color: 'black' }, hoverinfo: 'none'
+        });
+      }
+    }
+    // Rhythm Strip (Lead II)
+    let xRhythm = Array.from({length: n}, (_, i) => i / fs);
+    let yRhythm = currentSignal[1].map(v => v + 0);
+    traces.push({ x: xRhythm, y: yRhythm, mode: 'lines', line: { color: 'black', width: 1.5 }, hoverinfo: 'none' });
+    traces.push({
+      x: [0.1], y: [1.2], mode: 'text', text: ['II'],
+      textposition: 'top right', textfont: { size: 14, color: 'black' }, hoverinfo: 'none'
+    });
+
+    const gridColor = '#ffcccc';
+    const majorGridColor = '#ff9999';
+
+    const layout = {
+      title: '12-Lead Clinical ECG Layout (10s)',
+      height: 800,
+      showlegend: false,
+      plot_bgcolor: '#fff',
+      paper_bgcolor: '#fff',
+      margin: { t: 50, b: 50, l: 30, r: 30 },
+      xaxis: {
+        range: [0, 10], dtick: 0.2, minor: { dtick: 0.04, gridcolor: gridColor },
+        gridcolor: majorGridColor, zeroline: false, showticklabels: true,
+        title: 'Time (s)'
+      },
+      yaxis: {
+        range: [-2, 18], dtick: 0.5, minor: { dtick: 0.1, gridcolor: gridColor },
+        gridcolor: majorGridColor, zeroline: false, showticklabels: false
+      }
+    };
+
+    Plotly.react('waveformPlot', traces, layout, { responsive: true, staticPlot: true });
+
+  } else {
+    // Limb or Chest (Fallback simple layout)
+    let leadsToShow = currentWaveView === 'limb' ? [0,1,2,3,4,5] : [6,7,8,9,10,11];
+    const layout = {
+      height: leadsToShow.length * 150,
+      showlegend: false,
+      grid: { rows: leadsToShow.length, columns: 1, pattern: 'independent' },
+    };
+    let t = Array.from({ length: n }, (_, i) => i / fs);
+    
+    leadsToShow.forEach((leadIdx, i) => {
+      traces.push({
+        x: t, y: currentSignal[leadIdx], mode: 'lines', line: { color: '#1f77b4', width: 1.5 },
+        xaxis: 'x', yaxis: 'y' + (i === 0 ? '' : (i + 1))
+      });
+      layout['yaxis' + (i === 0 ? '' : (i + 1))] = { title: CANONICAL_LEADS[leadIdx], zeroline: false };
+      layout['xaxis' + (i === 0 ? '' : (i + 1))] = { zeroline: false };
+    });
+    Plotly.react('waveformPlot', traces, layout, { responsive: true });
+  }
+}
+
+function downloadECG() {
+  if (!currentSignal) return;
+  Plotly.downloadImage('waveformPlot', {
+    format: 'png',
+    width: 1200,
+    height: currentWaveView === 'all' ? 1600 : 800,
+    filename: 'ECGPredict_Report'
+  });
+}
+window.downloadECG = downloadECG;
+
+// ── Events ───────────────────────────────────────────────────────────────
+detectBtn.addEventListener('click', startPipeline);
+
+$('resultResetBtn').addEventListener('click', () => {
+  hide(resultCard);
+  document.querySelector('.content-grid').classList.remove('is-result-mode');
+  show(uploadCard);
+  heaFile = null;
+  datFile = null;
+  heaInput.value = '';
+  datInput.value = '';
+  heaFileName.textContent = 'No file selected';
+  datFileName.textContent = 'No .dat file selected';
+  updateStatus();
+});
+
+$('errorResetBtn').addEventListener('click', () => {
   hide(errorCard);
   show(uploadCard);
-  show(placeholderCard);
-}
-
-// ── Event Listeners ───────────────────────────────────────────────────────────
-
-// Browse button opens file picker
-browseBtn.addEventListener('click', () => fileInput.click());
-
-// Click on drop zone also opens file picker
-dropZone.addEventListener('click', () => fileInput.click());
-dropZone.addEventListener('keydown', e => {
-  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); }
 });
 
-// File input change
-fileInput.addEventListener('change', () => handleFiles(fileInput.files));
-
-// Drag events
-dropZone.addEventListener('dragover', e => {
-  e.preventDefault();
-  dropZone.classList.add('dragging');
-});
-dropZone.addEventListener('dragleave', e => {
-  if (!dropZone.contains(e.relatedTarget)) dropZone.classList.remove('dragging');
-});
-dropZone.addEventListener('drop', e => {
-  e.preventDefault();
-  dropZone.classList.remove('dragging');
-  handleFiles(e.dataTransfer.files);
-});
-
-// Global drag-over prevention
-document.addEventListener('dragover', e => e.preventDefault());
-document.addEventListener('drop',     e => e.preventDefault());
-
-// Predict button
-predictBtn.addEventListener('click', runPrediction);
-
-// Reset buttons
-resetBtn.addEventListener('click',       resetToUpload);
-resultResetBtn.addEventListener('click', resetToUpload);
-errorResetBtn.addEventListener('click',  resetToUpload);
-
-// ── Utility ───────────────────────────────────────────────────────────────────
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-// ── Init ──────────────────────────────────────────────────────────────────────
-// Show placeholder on load
+// ── Init ────────────────────────────────────────────────────────────────
 show(placeholderCard);

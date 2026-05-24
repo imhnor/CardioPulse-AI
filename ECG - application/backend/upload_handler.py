@@ -4,7 +4,6 @@ upload_handler.py
 Manages temporary ECG file storage during a request lifecycle.
 
 Handles:
-  - Single-file uploads (XML, DICOM, SCP-ECG)
   - Dual-file WFDB uploads (.hea + .dat stored together)
   - Session-based temp directories (auto-cleaned after prediction)
 """
@@ -50,9 +49,9 @@ class UploadSession:
 
         for name, path in self.files:
             if name.lower().endswith(".hea"):
-                return os.path.splitext(path)[0]  # return base record path
+                return path
 
-        # For single file uploads (XML, DICOM, SCP-ECG, etc.)
+        # For single-file formats, return the first one
         return self.files[0][1]
 
     def cleanup(self):
