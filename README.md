@@ -1,88 +1,167 @@
-<div align="center">
-  <h1>🫀 Automated Multi-Label ECG Classification</h1>
-  <p><b>Advanced Deep Learning Framework for PTB-XL Clinical Dataset</b></p>
-</div>
+# ECGPredict Application
 
-## 📖 Overview
-
-This repository contains an end-to-end Machine Learning and Deep Learning pipeline designed to perform **multi-label classification** of 12-lead Electrocardiograms (ECG). Trained and validated on the **PTB-XL dataset**, the system predicts five major cardiac diagnostic superclasses simultaneously. 
-
-We approach this problem with strict Data Science rigour. Our pipelines emphasize proper data handling to prevent leakage, sophisticated strategies to overcome extreme class imbalance, and strict regularization to prevent model overfitting in clinical scenarios.
+A full-stack web application for AI-powered 12-lead ECG diagnosis using a trained **ResNet1D** model on the PTB-XL dataset.
 
 ---
 
-## 🎯 Diagnostic Superclasses Predicted
+## Quick Start
 
-1. **NORM**: Normal ECG
-2. **MI**: Myocardial Infarction
-3. **STTC**: ST/T Change
-4. **CD**: Conduction Disturbance
-5. **HYP**: Hypertrophy
+### 1. Start the backend server
 
----
+```powershell
+# From repo root — uses the ecg_env virtualenv automatically
+.\ECG - application\start.ps1
+```
 
-## 🔬 Scientific Approach & Key Features
+Or manually:
 
-### 1. Robust Data Engineering
-- **Imputation & Cleaning**: Demographic features (`age`, `height`, `weight`) are strictly imputed using training-set medians. String categories like `pacemaker` and `sex` are rigorously binary encoded.
-- **Signal Processing**: The 100Hz 12-lead ECG `.dat` signals are loaded efficiently, standardized, and concatenated with normalized demographic inputs.
-- **No Data Leakage**: We strictly adhere to the PTB-XL 10-fold split constraint (Fold 1-8 for training, Fold 9 for validation, Fold 10 for testing). Scalers are fit exclusively on the training fold.
+```powershell
+cd "ECG - application\backend"
+..\..ecg_env\Scripts\python.exe -m uvicorn app:app --reload --port 8000
+```
 
-### 2. State-of-the-Art Deep Learning Models
-Instead of relying solely on classical ML with tabular data, our deep learning pipeline operates directly on the raw 1D signals:
-- **1D-ResNet**: Deep residual architectures designed to map complex spatial relationships across all 12 leads without vanishing gradients.
-- **CNN-BiLSTM**: Combines spatial feature extraction (CNN) with temporal sequence modelling (Bidirectional LSTM) to capture heart rhythms accurately over the 10-second window.
+### 2. Open the frontend
 
-### 3. Handling Extreme Class Imbalance
-To ensure minority classes (e.g., MI, HYP) are learned effectively:
-- Implemented **Class Weights** to heavily penalize errors on underrepresented diagnostics.
-- Supported **Focal Loss** to automatically focus learning on hard-to-predict samples.
+Open in browser: **http://localhost:8000/app**
 
-### 4. Zero Tolerance for Overfitting
-Models are guarded by clinical-grade regularization:
-- Heavy `Dropout` and `Spatial Dropout` layers.
-- `L2 Weight Decay` within AdamW optimizers.
-- **Early Stopping** based strictly on validation Macro-F1 scores and Validation Loss.
-- **1D Signal Augmentation** (Gaussian Noise, Baseline Wander) applied uniquely to the training set to encourage robust generalization.
+Or open directly: `ECG - application/frontend/index.html`
+
+> If opening the HTML file directly (without the server), edit `app.js` line 5:
+> `const API_BASE = 'http://localhost:8000';` — this already works for local use.
 
 ---
 
-## 📊 Evaluation & Clinical Validity
-
-Because accuracy is heavily skewed by the majority class (`NORM`), our primary evaluation metrics are **AUROC** and **Macro-F1**. 
-We provide comprehensive tools to generate:
-- Classification Reports with precision/recall for all 5 classes.
-- Optimal Decision Thresholds fine-tuned on the validation set.
-- Detailed visual insights for feature importance and confusion matrices.
-
----
-
-## 🛠️ Repository Structure
+## Project Structure
 
 ```
-├── config.py                          # Global parameters, paths, and model configs
-├── Deep_Learning_ECG_Detailed_Approach.md # In-depth technical methodology
-├── pipelines/
-│   ├── preprocessing_pipeline.py      # Cleans tabular metadata and saves splits
-│   ├── utils/ecg_dataset.py           # Deep Learning PyTorch dataset class
-│   └── train_dl_models.py             # Main PyTorch training scripts
-├── models/                            # Saved `.pt` and `.pkl` artifacts
-└── README.md                          # Project overview
+ECG - application/
+├── start.ps1               ← One-click startup script
+│
+├── backend/
+│   ├── app.py              ← FastAPI server (endpoints: /upload, /predict, /health)
+│   ├── upload_handler.py   ← Session-based temp file storage
+│   ├── format_detector.py  ← Auto-detect WFDB / DICOM / XML / SCP-ECG
+│   ├── ecg_extractor.py    ← Per-format signal extraction
+│   ├── preprocessing.py    ← Validate → resample → normalize → tensor
+│   ├── inference.py        ← ResNet1D definition + model load + predict
+│   └── requirements.txt
+│
+└── frontend/
+    ├── index.html          ← Single-page medical dashboard
+    ├── style.css           ← Premium medical UI theme
+    └── app.js              ← Upload + API calls + result rendering
 ```
 
 ---
 
-## 🚀 How to Run
+## API Endpoints
 
-1. **Preprocess the Data**:
-   ```bash
-   python pipelines/preprocessing_pipeline.py
-   ```
-2. **Train Models**:
-   ```bash
-   python pipelines/train_resnet.py 
-   ```
-3. **Evaluate Results**:
-   ```bash
-   python evaluate_all.py
-   ```
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET`  | `/api/health` | Server health + model status |
+| `GET`  | `/api/model-info` | Model architecture metadata |
+| `POST` | `/api/upload` | Upload ECG file(s) → returns session_id + signal info |
+| `POST` | `/api/predict` | Run inference on session → returns probabilities |
+| `POST` | `/api/upload-and-predict` | Combined single-step endpoint |
+
+### Upload Request
+```
+POST /api/upload
+Content-Type: multipart/form-data
+
+files: <ecg_file>            # For WFDB: both .hea and .dat files
+```
+
+### Upload Response
+```json
+{
+  "success": true,
+  "session_id": "uuid-...",
+  "format": "WFDB",
+  "format_display": "WFDB (PhysioNet)",
+  "lead_names": ["I","II","III","aVR","aVL","aVF","V1","V2","V3","V4","V5","V6"],
+  "n_leads": 12,
+  "fs": 100.0,
+  "n_samples": 1000,
+  "duration_s": 10.0,
+  "patient_info": {}
+}
+```
+
+### Predict Request
+```
+POST /api/predict
+Content-Type: multipart/form-data
+
+session_id: <uuid from upload>
+```
+
+### Predict Response
+```json
+{
+  "success": true,
+  "probabilities": { "NORM": 0.92, "MI": 0.05, "STTC": 0.03, "CD": 0.02, "HYP": 0.01 },
+  "predictions":   { "NORM": true, "MI": false, "STTC": false, "CD": false, "HYP": false },
+  "top_diagnosis": "Normal ECG",
+  "top_code": "NORM",
+  "top_confidence": 0.92,
+  "is_normal": true,
+  "labels_info": [ ... ],
+  "preprocessing": {
+    "original_fs": 100,
+    "target_fs": 100,
+    "resampled": false,
+    "padded": false,
+    "trimmed": false,
+    "lead_order": ["I","II","III","aVR","aVL","aVF","V1","V2","V3","V4","V5","V6"]
+  }
+}
+```
+
+---
+
+## Supported ECG Formats
+
+| Format | Extension(s) | Notes |
+|--------|-------------|-------|
+| WFDB | `.hea` + `.dat` | Upload both files together |
+| DICOM | `.dcm` | Standard DICOM waveform |
+| XML | `.xml` | HL7 aECG, Philips, GE, Schiller |
+| SCP-ECG | `.scp` | EN 1064 binary format |
+
+---
+
+## Model Details
+
+| Property | Value |
+|----------|-------|
+| Architecture | ResNet1D (4-stage, ~2M params) |
+| Training Data | PTB-XL (17,221 records) |
+| Input Shape | `(1, 12, 1000)` |
+| Sampling Rate | 100 Hz |
+| Lead Order | I, II, III, aVR, aVL, aVF, V1–V6 |
+| Normalisation | Per-lead z-score |
+| Output | 5-class sigmoid (multi-label) |
+| Classes | NORM, MI, STTC, CD, HYP |
+| Expected AUROC | 0.90–0.93 |
+
+---
+
+## Error Handling
+
+The application detects and displays clear error messages for:
+- **Unsupported format** — file type not recognised
+- **Missing leads** — fewer than 12 canonical leads found
+- **Invalid sampling rate** — below 50 Hz or above 10,000 Hz
+- **Corrupted file** — NaN/Inf values or unreadable binary
+- **Model not found** — `models/resnet1d.pth` missing
+
+---
+
+## Requirements
+
+Python packages (auto-installed by `start.ps1`):
+- `fastapi`, `uvicorn`
+- `torch`, `numpy`, `scipy`
+- `wfdb`, `pydicom`
+- `pandas`
