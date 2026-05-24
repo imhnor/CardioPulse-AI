@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ECG Predict — 12-Lead AI Diagnosis</title>
+  <meta name="description" content="AI-powered 12-lead ECG analysis. Upload your ECG file for instant ResNet1D-based cardiac diagnosis using the PTB-XL dataset." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ── Header ── -->
+  <header class="header">
+    <div class="header-inner">
+      <div class="logo">
+        <div class="logo-pulse">
+          <svg viewBox="0 0 40 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="0,10 6,10 9,2 12,18 15,6 18,14 21,10 40,10"/>
+          </svg>
+        </div>
+        <span class="logo-text">ECG<span class="logo-accent">Predict</span></span>
+      </div>
+      <div class="header-meta">
+        <div class="model-badge" id="modelBadge">
+          <span class="badge-dot" id="serverDot"></span>
+          <span id="serverStatus">Connecting...</span>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── Main ── -->
+  <main class="main">
+
+    <!-- ── Hero ── -->
+    <section class="hero">
+      <div class="hero-tag">ResNet1D · PTB-XL · 5-Class Multi-Label</div>
+      <h1 class="hero-title">AI-Powered ECG Diagnosis</h1>
+      <p class="hero-subtitle">
+        Upload a 12-lead ECG in any standard format. Our ResNet1D model analyses
+        morphology and rhythm to detect cardiac conditions with clinical-grade accuracy.
+      </p>
+    </section>
+
+    <!-- ── Content Grid ── -->
+    <div class="content-grid">
+
+      <!-- ─── Left Column: Upload + Status ─── -->
+      <div class="left-col">
+
+        <!-- Upload Card -->
+        <div class="card" id="uploadCard">
+          <div class="card-header">
+            <div class="card-icon card-icon--blue">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            </div>
+            <div>
+              <h2 class="card-title">Upload ECG File</h2>
+              <p class="card-sub">Drag & drop or click to select</p>
+            </div>
+          </div>
+
+          <!-- Drop Zone -->
+          <div class="drop-zone" id="dropZone" role="button" tabindex="0"
+               aria-label="Upload ECG file by clicking or dragging here">
+            <div class="drop-zone-content" id="dropZoneContent">
+              <div class="drop-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="12" x2="12" y2="18"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+              </div>
+              <p class="drop-title">Drop your ECG file here</p>
+              <p class="drop-hint">Supports: WFDB (.hea+.dat) · DICOM (.dcm) · XML (.xml) · SCP-ECG (.scp)</p>
+              <p class="drop-hint drop-hint--small">For WFDB: select both .hea and .dat files together</p>
+            </div>
+          </div>
+
+          <input type="file" id="fileInput" multiple
+                 accept=".hea,.dat,.dcm,.xml,.scp"
+                 style="display:none" aria-label="ECG file input" />
+
+          <button class="btn btn--primary btn--full" id="browseBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            Choose File(s)
+          </button>
+        </div>
+
+        <!-- Info Card: ECG Details (shown after upload) -->
+        <div class="card card--hidden" id="infoCard">
+          <div class="card-header">
+            <div class="card-icon card-icon--green">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            </div>
+            <div>
+              <h2 class="card-title">ECG Loaded</h2>
+              <p class="card-sub" id="infoFormatDisplay">—</p>
+            </div>
+          </div>
+
+          <div class="info-grid">
+            <div class="info-item">
+              <span class="info-label">Format</span>
+              <span class="info-value" id="infoFormat">—</span>
+            </div>
+            <div class="info-item">
+              <span class="info-label">Leads</span>
+              <span class="info-value" id="infoLeads">—</span>
+            </div>
+            <div class="info-item">
+              <span class="info-label">Sampling Rate</span>
+              <span class="info-value" id="infoFs">—</span>
+            </div>
+            <div class="info-item">
+              <span class="info-label">Duration</span>
+              <span class="info-value" id="infoDuration">—</span>
+            </div>
+            <div class="info-item">
+              <span class="info-label">Samples</span>
+              <span class="info-value" id="infoSamples">—</span>
+            </div>
+            <div class="info-item">
+              <span class="info-label">Patient</span>
+              <span class="info-value" id="infoPatient">—</span>
+            </div>
+          </div>
+
+          <!-- Lead Pills -->
+          <div class="leads-section">
+            <span class="leads-label">Detected Leads</span>
+            <div class="leads-pills" id="leadsPills"></div>
+          </div>
+
+          <!-- Predict Button -->
+          <button class="btn btn--primary btn--full btn--predict" id="predictBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+            Run AI Diagnosis
+          </button>
+
+          <button class="btn btn--ghost btn--full" id="resetBtn">
+            Upload different file
+          </button>
+        </div>
+
+        <!-- Processing Status Card -->
+        <div class="card card--hidden" id="processingCard">
+          <div class="card-header">
+            <div class="card-icon card-icon--amber">
+              <svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 11-6.219-8.56"/></svg>
+            </div>
+            <div>
+              <h2 class="card-title">Processing</h2>
+              <p class="card-sub" id="processingMessage">Analysing ECG signal...</p>
+            </div>
+          </div>
+          <div class="steps" id="processingSteps">
+            <div class="step" id="step-upload">
+              <div class="step-icon step-icon--waiting">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg>
+              </div>
+              <div class="step-body">
+                <span class="step-name">Uploading file</span>
+                <span class="step-desc" id="step-upload-desc">—</span>
+              </div>
+            </div>
+            <div class="step" id="step-detect">
+              <div class="step-icon step-icon--waiting">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg>
+              </div>
+              <div class="step-body">
+                <span class="step-name">Detecting format</span>
+                <span class="step-desc" id="step-detect-desc">—</span>
+              </div>
+            </div>
+            <div class="step" id="step-extract">
+              <div class="step-icon step-icon--waiting">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg>
+              </div>
+              <div class="step-body">
+                <span class="step-name">Extracting 12 leads</span>
+                <span class="step-desc" id="step-extract-desc">—</span>
+              </div>
+            </div>
+            <div class="step" id="step-preprocess">
+              <div class="step-icon step-icon--waiting">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg>
+              </div>
+              <div class="step-body">
+                <span class="step-name">Preprocessing signal</span>
+                <span class="step-desc" id="step-preprocess-desc">—</span>
+              </div>
+            </div>
+            <div class="step" id="step-infer">
+              <div class="step-icon step-icon--waiting">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/></svg>
+              </div>
+              <div class="step-body">
+                <span class="step-name">Running ResNet1D inference</span>
+                <span class="step-desc" id="step-infer-desc">—</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div><!-- /left-col -->
+
+      <!-- ─── Right Column: Results ─── -->
+      <div class="right-col">
+
+        <!-- Placeholder (shown before result) -->
+        <div class="placeholder-card" id="placeholderCard">
+          <div class="placeholder-ecg">
+            <svg viewBox="0 0 300 80" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.3">
+              <polyline points="0,40 20,40 30,15 40,65 50,25 60,55 70,40 90,40 100,40 110,20 120,60 130,35 140,45 150,40 170,40 180,40 190,18 200,62 210,28 220,52 230,40 250,40 260,40 270,22 280,58 290,40 300,40"/>
+            </svg>
+          </div>
+          <p class="placeholder-text">Upload an ECG file and run analysis to see results here</p>
+        </div>
+
+        <!-- Result Card (shown after prediction) -->
+        <div class="card card--hidden result-card" id="resultCard">
+          <!-- Diagnosis Banner -->
+          <div class="diagnosis-banner" id="diagnosisBanner">
+            <div class="diagnosis-icon" id="diagnosisIcon"></div>
+            <div class="diagnosis-body">
+              <div class="diagnosis-status" id="diagnosisStatus">—</div>
+              <div class="diagnosis-name" id="diagnosisName">—</div>
+              <div class="diagnosis-confidence" id="diagnosisConfidence">—</div>
+            </div>
+          </div>
+
+          <!-- Class Probabilities -->
+          <div class="proba-section">
+            <h3 class="section-title">Prediction Probabilities</h3>
+            <div class="proba-list" id="probaList"></div>
+          </div>
+
+          <!-- Preprocessing Info -->
+          <div class="prep-section" id="prepSection">
+            <h3 class="section-title">Signal Processing</h3>
+            <div class="prep-tags" id="prepTags"></div>
+          </div>
+
+          <!-- Disclaimer -->
+          <div class="disclaimer">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            <p>For research and educational use only. Not a substitute for clinical diagnosis.</p>
+          </div>
+
+          <button class="btn btn--ghost btn--full" id="resultResetBtn">
+            Analyse another ECG
+          </button>
+        </div>
+
+        <!-- Error Card -->
+        <div class="card card--hidden card--error" id="errorCard">
+          <div class="card-header">
+            <div class="card-icon card-icon--red">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+            </div>
+            <div>
+              <h2 class="card-title">Error</h2>
+              <p class="card-sub">Processing failed</p>
+            </div>
+          </div>
+          <div class="error-message" id="errorMessage">—</div>
+          <button class="btn btn--ghost btn--full" id="errorResetBtn">Try Again</button>
+        </div>
+
+        <!-- Model Info Sidebar -->
+        <div class="card model-info-card">
+          <h3 class="section-title" style="margin-bottom:1rem">Model Information</h3>
+          <div class="model-specs">
+            <div class="spec-row"><span>Architecture</span><span class="mono">ResNet1D</span></div>
+            <div class="spec-row"><span>Dataset</span><span class="mono">PTB-XL</span></div>
+            <div class="spec-row"><span>Input</span><span class="mono">(1, 12, 1000)</span></div>
+            <div class="spec-row"><span>Sampling</span><span class="mono">100 Hz</span></div>
+            <div class="spec-row"><span>Parameters</span><span class="mono">~2.0 M</span></div>
+            <div class="spec-row"><span>AUROC</span><span class="mono">0.90–0.93</span></div>
+          </div>
+          <div class="label-list">
+            <div class="label-item" style="--c:#22c55e"><span class="label-dot"></span><span class="label-code">NORM</span><span class="label-name">Normal ECG</span></div>
+            <div class="label-item" style="--c:#ef4444"><span class="label-dot"></span><span class="label-code">MI</span><span class="label-name">Myocardial Infarction</span></div>
+            <div class="label-item" style="--c:#f97316"><span class="label-dot"></span><span class="label-code">STTC</span><span class="label-name">ST/T Change</span></div>
+            <div class="label-item" style="--c:#a855f7"><span class="label-dot"></span><span class="label-code">CD</span><span class="label-name">Conduction Disturbance</span></div>
+            <div class="label-item" style="--c:#3b82f6"><span class="label-dot"></span><span class="label-code">HYP</span><span class="label-name">Hypertrophy</span></div>
+          </div>
+        </div>
+
+      </div><!-- /right-col -->
+    </div><!-- /content-grid -->
+  </main>
+
+  <!-- ── Footer ── -->
+  <footer class="footer">
+    <p>ECGPredict · ResNet1D trained on PTB-XL · 12-lead multi-label classification · Research use only</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
