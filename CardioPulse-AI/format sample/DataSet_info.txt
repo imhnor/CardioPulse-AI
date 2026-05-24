@@ -1,0 +1,8 @@
+PTB-XL contains about 21,799 clinical 12-lead ECGs from 18,869 patients, with 10-second recordings.
+
+MIMIC-IV-ECG contains about 800,000 diagnostic ECGs across nearly 160,000 patients, also with 12 leads and 10-second length at 500 Hz.
+
+https://physionet.org/content/ptb-xl/1.0.3/
+
+
+https://pmc.ncbi.nlm.nih.gov/articles/PMC12346745/#sec5-diagnostics-15-01950
