@@ -52,7 +52,8 @@ class UploadSession:
             if name.lower().endswith(".hea"):
                 return os.path.splitext(path)[0]  # return base record path
 
-        return None
+        # For single file uploads (XML, DICOM, SCP-ECG, etc.)
+        return self.files[0][1]
 
     def cleanup(self):
         """Delete all session files and directory."""

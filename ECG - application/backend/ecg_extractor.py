@@ -185,7 +185,7 @@ def _extract_xml(xml_path: str) -> ExtractionResult:
 
     # Try to find sampling frequency
     fs = 500.0
-    for tag in ["SampleRate", "sampleRate", "samplingFrequency", "SamplingFrequency", "ChannelSampleCountTotal"]:
+    for tag in ["SampleRate", "sampleRate", "SamplingRate", "samplingFrequency", "SamplingFrequency", "ChannelSampleCountTotal"]:
         els = find_all_stripped(root, tag)
         if els and els[0].text:
             try:
@@ -205,21 +205,21 @@ def _extract_xml(xml_path: str) -> ExtractionResult:
         if id_el is not None and wave_el is not None and wave_el.text:
             lead_name = _normalise_lead_name(id_el.text or "")
             try:
-                samples = np.array([float(v) for v in wave_el.text.split()], dtype=np.float32)
+                samples = np.array([float(v) for v in wave_el.text.replace(",", " ").split()], dtype=np.float32)
                 leads_data[lead_name] = samples
             except ValueError:
                 pass
 
     # Schema 2: <waveform><lead id="I">...</lead>
     if not leads_data:
-        lead_els = find_all_stripped(root, "lead")
+        lead_els = find_all_stripped(root, "lead") + find_all_stripped(root, "Lead")
         for le in lead_els:
             lead_id = le.attrib.get("id") or le.attrib.get("name") or ""
             text    = le.text or ""
             if lead_id and text.strip():
                 lead_name = _normalise_lead_name(lead_id)
                 try:
-                    leads_data[lead_name] = np.array([float(v) for v in text.split()], dtype=np.float32)
+                    leads_data[lead_name] = np.array([float(v) for v in text.replace(",", " ").split()], dtype=np.float32)
                 except ValueError:
                     pass
 
@@ -231,7 +231,7 @@ def _extract_xml(xml_path: str) -> ExtractionResult:
             if val_el is not None and val_el.text:
                 lead_name = CANONICAL_LEADS[i] if i < 12 else f"Lead{i+1}"
                 try:
-                    leads_data[lead_name] = np.array([float(v) for v in val_el.text.split()], dtype=np.float32)
+                    leads_data[lead_name] = np.array([float(v) for v in val_el.text.replace(",", " ").split()], dtype=np.float32)
                 except ValueError:
                     pass
 
@@ -267,6 +267,38 @@ def _extract_scp(scp_path: str) -> ExtractionResult:
     """
     with open(scp_path, "rb") as f:
         data = f.read()
+
+    # Check if it's actually JSON
+    if data.strip().startswith(b"{"):
+        import json
+        try:
+            js = json.loads(data)
+            fs = float(js.get("sampling_rate", 500.0))
+            leads = js.get("leads", [])
+            signals = js.get("signals", [])
+            
+            leads_data = {}
+            for i, lead_name in enumerate(leads):
+                if i < len(signals):
+                    leads_data[_normalise_lead_name(lead_name)] = np.array(signals[i], dtype=np.float32)
+            
+            if leads_data:
+                n_samples = min(len(v) for v in leads_data.values())
+                signal    = np.zeros((n_samples, 12), dtype=np.float32)
+                for i, lead in enumerate(CANONICAL_LEADS):
+                    if lead in leads_data:
+                        signal[:, i] = leads_data[lead][:n_samples]
+
+                return ExtractionResult(
+                    signal=signal,
+                    fs=fs,
+                    lead_names=list(leads_data.keys()),
+                    n_samples=n_samples,
+                    duration_s=n_samples / fs,
+                    source_format="SCP-ECG (JSON)",
+                )
+        except Exception:
+            pass
 
     # SCP-ECG structure:
     # Bytes 0-3 : file CRC (uint16) + file length (uint32) — actually first 6 bytes are section 0 header

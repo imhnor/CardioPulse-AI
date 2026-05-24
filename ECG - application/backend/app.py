@@ -162,17 +162,10 @@ async def upload_ecg(files: list[UploadFile] = File(...)):
         if not primary_path:
             raise HTTPException(status_code=400, detail="Could not determine primary ECG file.")
         # Detect format
-        fmt = detect_format(primary_path)
-        if fmt == ECGFormat.UNKNOWN:
-            cleanup_session(session.session_id)
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "Unsupported file format. Accepted: WFDB (.hea+.dat), "
-                    "DICOM (.dcm), XML (.xml), SCP-ECG (.scp)"
-                )
-            )
+        # WFDB special case handled above
 
+        # now safe to detect format
+        fmt = detect_format(primary_path)
         # Extract signal
         try:
             result = extract_ecg(primary_path, fmt)
