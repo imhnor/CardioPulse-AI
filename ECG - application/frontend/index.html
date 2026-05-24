@@ -38,10 +38,10 @@
 
     <!-- ── Hero ── -->
     <section class="hero">
-      <div class="hero-tag">ResNet1D · PTB-XL · 5-Class Multi-Label · WFDB Input</div>
+      <div class="hero-tag">ResNet1D · PTB-XL · 5-Class Multi-Label</div>
       <h1 class="hero-title">AI-Powered ECG Diagnosis</h1>
       <p class="hero-subtitle">
-        Upload a 12-lead WFDB ECG record (.hea + .dat). Our ResNet1D model analyses
+        Upload a 12-lead ECG record. Our ResNet1D model analyses
         morphology and rhythm to detect cardiac conditions with clinical-grade accuracy.
       </p>
     </section>
@@ -234,27 +234,26 @@
       <!-- ─── Right Column: Results ─── -->
       <div class="right-col">
 
-        <!-- Placeholder (shown before result) -->
-        <div class="placeholder-card" id="placeholderCard">
-          <div class="placeholder-ecg">
-            <svg viewBox="0 0 300 80" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.3">
-              <polyline points="0,40 20,40 30,15 40,65 50,25 60,55 70,40 90,40 100,40 110,20 120,60 130,35 140,45 150,40 170,40 180,40 190,18 200,62 210,28 220,52 230,40 250,40 260,40 270,22 280,58 290,40 300,40"/>
-            </svg>
-          </div>
-          <p class="placeholder-text">Upload an ECG record (WFDB, CSV, MAT, SCP, XML) and run analysis to see results and waveform here</p>
-        </div>
-
         <!-- Result Card (shown after prediction) -->
         <div class="card card--hidden result-card" id="resultCard">
+          
+          <!-- Top Action Bar -->
+          <div style="display: flex; justify-content: flex-end; padding: 1.5rem 1.5rem 0;">
+            <button class="btn btn--primary" id="resultResetBtn" style="background: var(--purple-500); box-shadow: 0 4px 12px rgba(168, 85, 247, 0.4);">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 2v6h6"/></svg>
+              Analyse Another ECG
+            </button>
+          </div>
+
           <!-- Diagnosis Banner -->
           <div class="diagnosis-banner" id="diagnosisBanner">
             <div class="diagnosis-icon" id="diagnosisIcon"></div>
             <div class="diagnosis-body">
-              <div class="diagnosis-status" id="diagnosisStatus">—</div>
-              <div class="diagnosis-name" id="diagnosisName">—</div>
-              <div class="diagnosis-confidence" id="diagnosisConfidence">—</div>
+              <div class="diagnosis-status" id="diagnosisStatus"></div>
+              <div class="diagnosis-name" id="diagnosisName"></div>
+              <div class="diagnosis-confidence" id="diagnosisConfidence"></div>
             </div>
-          <div id="avgConfidence" class="avg-confidence"></div>
+            <div id="avgConfidence" class="avg-confidence"></div>
           </div>
 
           <!-- 12-Lead Waveform Viewer -->
@@ -292,9 +291,6 @@
             <p>For research and educational use only. Not a substitute for clinical diagnosis.</p>
           </div>
 
-          <button class="btn btn--ghost btn--full" id="resultResetBtn">
-            Analyse another ECG
-          </button>
         </div>
 
         <!-- Error Card -->

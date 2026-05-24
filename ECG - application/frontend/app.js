@@ -178,7 +178,7 @@ let currentWaveView = 'all';
 // ── Result ───────────────────────────────────────────────────────────────
 function renderResult(data) {
   show(resultCard);
-  document.querySelector('.content-grid').classList.add('is-result-mode');
+
 
   $('diagnosisName').textContent = data.top_diagnosis || "Unknown";
   $('diagnosisConfidence').textContent =
@@ -341,7 +341,6 @@ detectBtn.addEventListener('click', startPipeline);
 
 $('resultResetBtn').addEventListener('click', () => {
   hide(resultCard);
-  document.querySelector('.content-grid').classList.remove('is-result-mode');
   show(uploadCard);
   heaFile = null;
   datFile = null;
