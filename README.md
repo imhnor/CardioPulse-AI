@@ -1,6 +1,8 @@
 # ECGPredict Application
 
-A full-stack web application for AI-powered 12-lead ECG diagnosis using a trained **ResNet1D** model on the PTB-XL dataset.
+A web application for AI-powered 12-lead ECG diagnosis using a trained **ResNet1D** model on the PTB-XL dataset.
+
+**https://imhnor-cardiopulse-ai.hf.space/**
 
 ---
 
@@ -22,7 +24,7 @@ cd "ECG - application\backend"
 
 ### 2. Open the frontend
 
-Open in browser: **http://localhost:8000/app**
+Open in browser: http://localhost:8000/app
 
 Or open directly: `ECG - application/frontend/index.html`
 
