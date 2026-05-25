@@ -145,7 +145,7 @@ session_id: <uuid from upload>
 | Normalisation | Per-lead z-score |
 | Output | 5-class sigmoid (multi-label) |
 | Classes | NORM, MI, STTC, CD, HYP |
-| Expected AUROC | 0.90–0.93 |
+| AUROC | 0.92 |
 
 ---
 
