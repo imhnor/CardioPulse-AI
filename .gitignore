@@ -1,5 +1,4 @@
 /ecg_env
-/preprocessed
 /extra
 *.dat
 *.hea
@@ -8,12 +7,8 @@
 /ECG - application/format sample
 /ECG - application/tmp_uploads
 /models
-/ECG - application/tmp_uploads
 env/
 venv/
-*.xlsx
-data/processed/
-*.csv
 /notes
 /__pycache__
 /__pycache__
